@@ -1,0 +1,22 @@
+# Python
+*.pyc
+__pycache__/
+*.egg-info/
+
+# Large data files — not tracked in git
+*.jsonl
+*.npz
+*.pkl
+*.json
+*.csv
+
+# Mac
+.DS_Store
+
+# Logs
+*.out
+*.err
+*.log
+
+# Results added manually after experiments complete
+# results/ intentionally empty until pilot finishes

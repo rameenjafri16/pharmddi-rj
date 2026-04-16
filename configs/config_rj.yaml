@@ -1,0 +1,206 @@
+# config_rj.yaml
+# Rameen Jafri — April 2026
+#
+# Configuration for the RJ variant of the PharmCoT pipeline.
+# Inherits everything from config.yaml and overrides only what changes.
+#
+# KEY DIFFERENCES FROM config.yaml (Mohammadreza's original):
+#
+#   1. processed_dir → data/processed/dataset_A
+#      Uses our filtered dataset (same 129 classes, same >=130 threshold)
+#      rather than relying on Mohammadreza's processed files.
+#      Switch to dataset_B for the extended 194-class experiment.
+#
+#   2. retrieval_file → retrieved_examples_train_pathway.json
+#      Uses pathway-aware RAG retrieval instead of Tanimoto structural
+#      similarity. This is the core experimental change.
+#      Build this file first with: python src/pathway_retrieval.py --split train
+#
+#   3. output_dir → outputs/rj_pipeline
+#      All outputs (traces, checkpoints, results) go to a separate directory
+#      so they never overwrite Mohammadreza's outputs.
+#
+#   4. n_classes → 129 (Dataset A) or 194 (Dataset B)
+#      Set to match whichever dataset you're using.
+#
+# USAGE:
+#   # Run teacher generation with pathway retrieval:
+#   python -m src.teacher_generation --config configs/config_rj.yaml
+#
+#   # Run student training with pathway-generated traces:
+#   python -m src.student_training --config configs/config_rj.yaml --condition C_summary
+#
+#   # For Dataset B experiment (194 classes):
+#   # Change processed_dir to data/processed/dataset_B and n_classes to 194
+
+project:
+  name: ddi_cot_distillation_v3_rj
+  seed: 42
+  # RJ outputs go here — never overwrites Mohammadreza's outputs/
+  output_dir: outputs/rj_pipeline
+
+data:
+  xml_path: data/raw/drugbank_full.xml
+  ddinter_dir: data/raw/ddinter
+  # Uses our filtered dataset (same threshold as Mohammadreza's)
+  # Switch to data/processed/dataset_B for the 194-class experiment
+  processed_dir: data/processed/dataset_A
+  train_ratio: 0.8
+  min_pairs_per_class: 130
+  max_train_per_class: 5000
+  n_classes: 129
+  # RJ ADDITION: pathway retrieval file instead of Tanimoto
+  # Build with: python src/pathway_retrieval.py --split train
+  # Leave commented out to fall back to retrieved_examples_train.json
+  retrieval_file: data/processed/retrieved_examples_train_pathway.json
+  use_rj_prompts: true
+
+# Teacher model — identical to Mohammadreza's config
+# (same model, same parameters, only the prompt and retrieval change)
+teacher:
+  model_name: meta-llama/Llama-3.3-70B-Instruct
+  tensor_parallel_size: 4
+  dtype: float16
+  max_model_len: 8192
+  max_new_tokens: 1536
+  temperature: 0.6
+  top_p: 0.95
+  batch_size: 64
+  gpu_memory_utilization: 0.92
+  save_every_n_batches: 50
+
+# Judge ensemble — identical to Mohammadreza's config
+judge:
+  models:
+    - model_name: aaditya/Llama3-OpenBioLLM-70B
+      tensor_parallel_size: 4
+      dtype: float16
+      max_model_len: 4096
+      gpu_memory_utilization: 0.90
+      weight: 0.35
+    - model_name: google/txgemma-27b-chat
+      tensor_parallel_size: 2
+      dtype: float16
+      max_model_len: 4096
+      gpu_memory_utilization: 0.90
+      weight: 0.35
+    - model_name: Qwen/Qwen2.5-72B-Instruct
+      tensor_parallel_size: 4
+      dtype: float16
+      max_model_len: 4096
+      gpu_memory_utilization: 0.90
+      weight: 0.30
+  hard_gate_min: 3
+  weighted_score_min: 3.0
+  tiered_thresholds:
+    head_min_traces: 2000
+    mid_min_traces: 500
+    tail_min_keep: 50
+    absolute_min: 20
+
+# Student model — identical to Mohammadreza's config
+student:
+  model_name: Qwen/Qwen3-8B
+  dtype: bfloat16
+  max_length: 8192
+  lora:
+    r: 64
+    alpha: 128
+    dropout: 0.05
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+  training:
+    num_epochs: 3
+    per_device_batch_size: 1
+    gradient_accumulation_steps: 16
+    learning_rate: 2.0e-4
+    weight_decay: 0.01
+    warmup_ratio: 0.03
+    lr_scheduler_type: cosine
+    bf16: true
+    gradient_checkpointing: true
+    logging_steps: 50
+    save_steps: 500
+    eval_steps: 500
+    fsdp:
+      enabled: true
+      sharding_strategy: full_shard
+      auto_wrap: true
+      min_num_params: 1000000
+      backward_prefetch: backward_pre
+      forward_prefetch: false
+      use_orig_params: true
+      cpu_ram_efficient_loading: true
+      sync_module_states: true
+    sequential_lr_ratio: 0.25
+    sequential_epochs: 2
+    sampling_temperature: 0.5
+    summary_sampling_temperature: 0.25
+    cls_weight: 5.0
+    min_per_class: 100
+
+grounded_eval:
+  precision_weight: 0.7
+  low_score_percentile: 15
+  discard_threshold: 0.3
+
+refinement:
+  model_name: meta-llama/Llama-3.3-70B-Instruct
+  tensor_parallel_size: 4
+  dtype: float16
+  max_model_len: 8192
+  max_new_tokens: 1536
+  temperature: 0.4
+  top_p: 0.95
+  batch_size: 64
+  gpu_memory_utilization: 0.92
+
+api_eval:
+  sample_size: 1000
+  models:
+    - gpt-4o
+    - gemini-2.5-flash
+  rubric_dimensions:
+    - mechanism_accuracy
+    - factual_grounding
+    - causal_chain
+    - drug_specificity
+    - summary_quality
+
+retrieval:
+  fingerprint_bits: 2048
+  fingerprint_radius: 2
+  top_k: 5
+  min_diverse_classes: 2
+
+baseline_ml:
+  fingerprint_bits: 2048
+  fingerprint_radius: 2
+  n_estimators: 300
+  max_depth: 12
+  n_jobs: -1
+
+dpo:
+  learning_rate: 5.0e-7
+  num_epochs: 1
+  beta: 0.1
+  n_samples: 4
+  temperature: 0.7
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 8
+
+evaluation:
+  batch_size: 64
+  max_new_tokens: 512
+  n_manual_review: 50
+  bertscore_model: microsoft/deberta-xlarge-mnli
+  ece_n_bins: 15
+  prompt_variants: 3
+  self_consistency_n: 5
+  self_consistency_sample: 5000
