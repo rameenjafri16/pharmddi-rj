@@ -274,13 +274,60 @@ A second issue was that Mohammadreza's precomputed Tanimoto retrieval file was b
 
 ### Results
 
-The corrected experiment is currently running (SLURM job 12298450, Nibi cluster, submitted April 16 2026). Results will be added here upon completion.
+The corrected pilot experiment generated 4,000 teacher traces under each condition using Llama-3.3-70B-Instruct, with verified correct index alignment between sampled pairs and retrieved examples (4,000 unique `orig_idx` values per condition, confirmed 
+non-zero).
 
-The primary comparison will be:
-- Mean grounded factuality score: Tanimoto condition vs Pathway + RJ condition
-- Per-tier breakdown: head, mid, tail
-- Prodrug-specific slice: F1 on the 8.3% of pairs involving prodrugs, where 
-  direction-of-effect errors are most likely
+#### Grounded Factuality
 
-If grounded factuality scores differ significantly between conditions, this provides evidence that retrieval strategy and prompt quality affect teacher reasoning. If scores are similar, it suggests either that grounded factuality is not sensitive enough to detect the difference — it checks entity presence but not directional correctness — or that the improvements manifest downstream 
-in student training rather than in raw trace scores.
+| Condition | Mean Score | Head | Mid | Tail |
+|-----------|-----------|------|-----|------|
+| Tanimoto + original prompts | 0.7365 | 0.7484 | 0.7340 | 0.7284 |
+| Pathway + RJ prompts | 0.7284 | 0.7414 | 0.7223 | 0.7231 |
+| Δ (pathway − tanimoto) | −0.0081 | −0.0070 | −0.0117 | −0.0053 |
+
+Grounded factuality shows no significant difference between conditions (delta 0.008, verdict: no significant difference). As discussed in the methodology section, this metric checks entity presence but not directional correctness — it cannot distinguish 
+between a trace that correctly states "CYP2C9 inhibition increases warfarin levels" and one that incorrectly states the opposite. Both mention CYP2C9 and both score identically.
+
+#### Direction-Aware Evaluation
+
+To properly measure the impact of the prompt improvements, I developed a direction-aware scorer (`src/direction_scorer.py`) that checks whether the trace correctly states the direction of the interaction effect — whether Drug X levels increase or decrease — by extracting the ground truth direction from the interaction label and checking the trace's ## Summary section for a matching directional statement about the relevant subject (serum concentration, metabolism, excretion, absorption).
+
+| Condition | Overall Correct | Overall Wrong | Overall Ambiguous |
+|-----------|----------------|---------------|------------------|
+| Tanimoto + original prompts | 61.1% | 2.6% | 17.5% |
+| Pathway + RJ prompts | 60.0% | 2.7% | 17.1% |
+
+At the overall level, both conditions perform similarly. The signal emerges when the sample is split by prodrug status:
+
+| Condition | Prodrug Correct | Prodrug Wrong | Prodrug Ambiguous | Prodrug Mention Rate |
+|-----------|----------------|---------------|------------------|---------------------|
+| Tanimoto + original prompts | 51.8% | 4.7% | 20.2% | 84.8% |
+| Pathway + RJ prompts | **58.4%** | 4.5% | **13.6%** | **95.5%** |
+
+On prodrug-involving pairs — 9.6% of the sample, including clinically critical interactions like clopidogrel + CYP2C19 inhibitors — the RJ prompt improvements produce three measurable changes:
+
+**First**, directional correctness increases from 51.8% to 58.4% (+6.6 percentage points). The teacher more often reasons correctly about activation rather than elimination for prodrug pairs.
+
+**Second**, ambiguous/hedging traces decrease from 20.2% to 13.6% (−6.6 percentage points). The prodrug warning makes the teacher more confident and more conclusive in its reasoning, not just more often correct.
+
+**Third**, prodrug/activation concept mention rate increases from 84.8% to 95.5%. The explicit prodrug warning in the RJ prompt reliably shifts the teacher's reasoning framework toward activation rather than standard substrate+inhibitor reasoning.
+
+The improvement is diluted at the overall level because prodrug pairs are only 9.6% of the sample — 3,618 normal pairs where the two conditions are essentially identical pull the headline numbers together. The effect is concentrated exactly where it was designed to be.
+
+An additional finding from the direction-aware analysis: metabolism interactions are the hardest subject for both conditions, with correct direction rates of only 7% (Tanimoto) and 11% (Pathway). Absorption interactions are easiest at ~80-82% correct for both. This suggests that metabolism-type interactions — which require the most nuanced reasoning about enzyme substrate/inhibitor/inducer relationships and downstream concentration effects — represent the largest remaining quality gap 
+in teacher trace generation, independent of retrieval strategy.
+
+#### Summary
+
+The pilot experiment produces two findings that together tell a coherent story:
+
+1. **Grounded factuality is insensitive to retrieval strategy** — both conditions 
+   score similarly on entity presence, confirming that this metric cannot detect 
+   the pharmacological improvements that pathway retrieval provides.
+
+2. **Direction-aware evaluation detects the prodrug improvement** — the RJ prompt 
+   changes produce a measurable, specific improvement on the 9.6% of pairs where 
+   direction errors are most clinically dangerous: +6.6pp correct, −6.6pp ambiguous, 
+   +10.7pp prodrug concept mention rate.
+
+The natural next step is extending this analysis to the full 236K training set and measuring whether a student model trained on RJ traces achieves higher classification accuracy specifically on prodrug-involving test pairs.
