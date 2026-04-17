@@ -1,8 +1,6 @@
-# pharmddi-rj
-
 # PharmCoT-RJ: Pathway-Aware Retrieval for Drug-Drug Interaction CoT Distillation
 
-**Rameen Jafri** | MSc Bioinformatics | University of Guelph | DATA 6400  
+**Rameen Jafri** | University of Guelph | DATA 6400  
 **April 2026**
 
 ## Background 
