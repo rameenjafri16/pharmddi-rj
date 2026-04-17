@@ -110,3 +110,128 @@ What it does not yet prove is whether this improvement in example quality transl
 The hypothesis is straightforward: a teacher shown mechanistically relevant examples should produce traces that reason more accurately about the underlying pharmacological mechanism. If that hypothesis holds, we would expect to see higher grounded factuality scores on pathway traces, and ultimately higher classification F1 on the student model trained on those traces. The effect should be largest on the 8.3% of training pairs involving prodrug interactions, where the direction of effect is reversed and mechanistically correct examples are most critical — these pairs are the subject of Contribution 2.
 
 Whether the improvement is large enough to be clinically meaningful is an open question. A ~20 percentage point improvement in MOR is a substantial pharmacological difference. Whether it moves the needle on student F1 depends on how sensitive the distillation pipeline is to example quality — something only the full experiment can answer.
+
+
+## Contribution 2: Pharmacologically-Correct Teacher Prompts
+
+### Background
+
+Beyond the retrieval strategy, the teacher model's reasoning quality depends on the information it receives in its prompt. In PharmCoT, each teacher prompt contains: the query drug pair, their pharmacological profiles from DrugBank (enzymes, transporters, targets, mechanism of action), the five retrieved examples, and the ground-truth interaction label. The teacher reads all of this and produces a step-by-step mechanistic explanation.
+
+The prompt is therefore the teacher's entire pharmacological context. Anything missing from the prompt is information the teacher has to infer on its own — and large language models, even at 70B parameters, make systematic errors when asked to reason about pharmacology without explicit guidance. Three such errors exist in the original prompt design.
+
+---
+
+### Fix 1: PK/PD Interaction Type Flag
+
+#### The Problem
+
+Drug-drug interactions fall into two fundamentally different categories that require completely different reasoning frameworks.
+
+A **pharmacokinetic (PK) interaction** occurs when one drug changes how much of the other drug gets into the body — by blocking or accelerating the enzymes that metabolise it, the transporters that move it across membranes, or the proteins that bind it in the bloodstream. The reasoning here is about ADME: absorption, distribution, metabolism, excretion. The teacher needs to think about CYP enzymes, P-glycoprotein, drug half-life, plasma concentrations.
+
+A **pharmacodynamic (PD) interaction** occurs when two drugs act on the same receptor or physiological system at the same time, producing a combined effect that is stronger, weaker, or qualitatively different from either drug alone. The reasoning here is about receptor occupancy, downstream signalling, and physiological consequences. The teacher needs to think about mechanisms of action, target overlap, and additive or antagonistic effects.
+
+The original PharmCoT prompt contains no signal about which type applies. The teacher has to infer the interaction type from the label text alone — for example, "The serum concentration of Drug A can be increased when combined with Drug B" implies PK reasoning, while "Drug A may increase the CNS depressant activities of Drug B" implies PD reasoning. This inference is usually possible from the label, but it is an unnecessary cognitive load that introduces inconsistency. A teacher that misclassifies interaction type will apply the wrong reasoning framework entirely — generating a trace about receptor binding for a metabolic interaction, or about enzyme inhibition for a pharmacodynamic one.
+
+#### My Approach
+
+I built a keyword-based classifier, `classify_pk_pd()`, that maps any DrugBank interaction template to either PK or PD with 100% coverage across all 129 interaction classes in Dataset A — verified empirically with zero ambiguous cases.
+
+The classifier checks for PK-specific language first (serum concentration, metabolism, excretion, absorption, half-life, clearance, bioavailability, protein binding) and returns PK if any match. Otherwise it returns PD. PK takes priority over PD when both keyword types appear in the same template, because many templates describe a PK mechanism that leads to a PD outcome — for example, "excretion rate decreased resulting in lower serum concentration" is a PK interaction even though serum concentration has clinical consequences.
+
+The teacher prompt now includes a single line for every trace:
+
+> *Interaction type: PK (pharmacokinetic — reason about ADME mechanisms, 
+> enzyme/transporter roles, and drug level changes)*
+
+or
+
+> *Interaction type: PD (pharmacodynamic — reason about receptor/system effects 
+> and combined pharmacological actions)*
+
+Of the 129 classes in Dataset A, 15 are PK and 114 are PD — a distribution that reflects the clinical reality that most documented DDIs are pharmacodynamic in nature, while the most dangerous and well-characterised ones tend to be pharmacokinetic.
+
+
+### Fix 2: Prodrug Warning
+
+#### The Problem
+
+A prodrug is a pharmacologically inactive compound that must be converted into its active form by an enzyme in the body before it can exert any therapeutic effect. This conversion typically happens in the liver and is carried out by CYP enzymes or esterases. The drug you swallow is not the drug that works — it is a chemical precursor that your body activates.
+
+This creates a critical asymmetry in how enzyme inhibition affects drug levels. For a normal drug, the standard reasoning is:
+
+> Enzyme inhibitor + substrate → enzyme is blocked → drug is not broken down → 
+> **more drug accumulates in blood** → stronger effect, potential toxicity
+
+For a prodrug, the reasoning is exactly reversed:
+
+> Enzyme inhibitor + prodrug substrate → enzyme is blocked → prodrug is not 
+> activated → **less active drug in blood** → weaker effect, potential treatment 
+> failure
+
+The teacher model has no way to know which direction applies unless it is explicitly told the drug is a prodrug. Without this information, it will default to the standard substrate+inhibitor reasoning and generate a trace with the wrong direction of effect.
+
+The clinical stakes are high. The most well-known example is **clopidogrel + omeprazole**. Clopidogrel is a prodrug — it requires CYP2C19 to convert it into its active thiol metabolite, which is what actually inhibits platelet aggregation and prevents blood clots. Omeprazole, a common heartburn drug, is a potent CYP2C19 inhibitor. Co-administration blocks clopidogrel's activation, reducing its antiplatelet effect by up to 40%. For a heart attack patient taking clopidogrel to prevent a second event, this interaction can be fatal. A teacher model reasoning about this pair without a prodrug flag would likely write:
+
+> *"Omeprazole inhibits CYP2C19, blocking clopidogrel's metabolism, causing 
+> clopidogrel levels to increase and enhancing its antiplatelet effect."*
+
+This is pharmacologically backwards. The correct trace says:
+
+> *"Omeprazole inhibits CYP2C19, blocking clopidogrel's bioactivation to its active 
+> thiol metabolite. This reduces active metabolite levels, decreasing antiplatelet 
+> efficacy and increasing thrombotic risk."*
+
+Both traces mention CYP2C19. Both pass standard quality checks. But one is dangerously wrong.
+
+#### Scale of the Problem
+
+To quantify how often this occurs in the dataset, I scanned DrugBank 5.1.17 for prodrug annotations using two signals: explicit prodrug group flags and prodrug references in drug description or mechanism-of-action text. I identified **183 prodrugs** with DDI interactions in DrugBank, of which **125 appear in Dataset A**. These 125 prodrugs are involved in **19,639 training pairs — 8.3% of all training data**.
+
+Notable prodrugs in the dataset include clopidogrel, prasugrel, and ticlopidine (antiplatelet agents), simvastatin and lovastatin (statins), nearly all ACE inhibitors (enalapril, ramipril, lisinopril, perindopril — the "-pril" suffix typically indicates 
+a prodrug), fosphenytoin (epilepsy), capecitabine (cancer), levodopa (Parkinson's), and valganciclovir (antiviral).
+
+#### My Approach
+
+I added a prodrug warning to the teacher prompt for any pair involving a prodrug. 
+The warning appears as:
+
+> *⚠️ PRODRUG WARNING: Clopidogrel is a prodrug — it is pharmacologically inactive 
+> until converted to its active form by an enzyme. If an enzyme involved in its 
+> activation is inhibited, the result is DECREASED active drug levels (not increased). 
+> Reason about activation, not elimination.*
+
+This single sentence gives the teacher the pharmacological context it needs to reason in the correct direction. It fires for 8.3% of training pairs — the subset where direction-of-effect errors are most likely and most clinically consequential.
+
+The prodrug list is saved to `data/processed/prodrug_ids.json` and loaded once at the start of teacher generation. The lookup adds negligible overhead — a set membership check per pair.
+
+### Fix 3: Raised Profile Truncation Caps
+
+#### The Problem
+
+The teacher model's pharmacological context for each drug comes from its DrugBank profile — a structured summary of its enzymes, transporters, targets, mechanism of action, and other annotations. This profile is formatted and inserted into the prompt 
+by `_format_drug_profile()` in `data_preparation.py`.
+
+The original implementation truncates these profiles at prompt construction time:
+
+- Enzymes: capped at **5**
+- Transporters: capped at **3**
+- Targets: capped at **3**
+
+For most drugs these caps are not binding — the average drug in DrugBank has fewer than 5 enzyme annotations. But for heavily metabolised drugs, the caps quietly drop pharmacologically important information from the prompt with no indication that 
+truncation occurred. The teacher receives an incomplete profile and has no way to know it is missing data.
+
+This matters most for drugs involved in complex polypharmacy interactions — exactly the cases where complete enzyme information is most critical. Nicotine, for example, is metabolised by CYP2A6, CYP2B6, CYP2C9, CYP2D6, CYP2E1, FMO3, and several UGT enzymes. Under the original caps, the teacher sees only the first five. If the interaction being explained involves an enzyme that appears sixth or later in DrugBank's listing, the teacher's prompt contains no mention of it. The resulting trace may reason about the wrong enzyme entirely.
+
+A diagnostic check across all 4,629 drug profiles in Dataset A found that 94 drugs (2.0%) hit the enzyme cap, 207 drugs (4.5%) hit the target cap, and 239 drugs (5.2%) hit the transporter cap. The drugs hitting the enzyme cap include Nicotine, Troglitazone, and Dapsone — all compounds with broad CYP involvement where complete enzyme context is clinically meaningful.
+
+#### My Approach
+
+I raised the truncation caps in `_format_drug_profile()`:
+
+- Enzymes: 5 → **8**
+- Transporters: 3 → **5**  
+- Targets: 3 → **5**
+
+This is a three-number change with no computational overhead. Prompt length increases only for the small fraction of drugs that were previously truncated. The caps were not removed entirely because very long profiles can push complex prompts toward the model's context window limit. The raised values represent a balance between completeness and prompt length informed by the annotation count distribution across the dataset.
