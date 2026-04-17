@@ -235,3 +235,52 @@ I raised the truncation caps in `_format_drug_profile()`:
 - Targets: 3 → **5**
 
 This is a three-number change with no computational overhead. Prompt length increases only for the small fraction of drugs that were previously truncated. The caps were not removed entirely because very long profiles can push complex prompts toward the model's context window limit. The raised values represent a balance between completeness and prompt length informed by the annotation count distribution across the dataset.
+
+
+## Contribution 3: Subset Pilot Experiment
+
+### Background
+
+The retrieval quality experiment in Contribution 1 proves that pathway retrieval selects mechanistically better examples. But MOR is a proxy metric — it measures the quality of the teacher's inputs, not the quality of the teacher's outputs. The ultimate question is whether better inputs produce better reasoning traces, and whether better traces produce a better student model.
+
+To answer this, I designed and ran a subset pilot experiment: generate teacher traces for 4,000 drug pairs under both retrieval conditions using Llama-3.3-70B-Instruct, score the traces with grounded factuality, and directly compare trace quality between 
+conditions. This isolates the effect of retrieval strategy on teacher output quality before committing to a full 236K-pair training run.
+
+---
+
+### Experimental Design
+
+**Sample:** 4,000 pairs drawn from Dataset A using stratified sampling across frequency tiers — 1,200 head pairs, 1,400 mid pairs, 1,400 tail pairs. The tail is deliberately overrepresented relative to its proportion in the full dataset because the pathway retrieval hypothesis is most interesting for rare classes where Tanimoto similarity is weakest. The same 4,000 pairs are used for both conditions, saved to `sampled_pairs.jsonl` on first run and reloaded on subsequent runs for reproducibility.
+
+**Condition 1 — Tanimoto baseline:** Teacher prompted with original prompts (no PK/PD flag, no prodrug warning) and Tanimoto-retrieved examples. Tanimoto retrievals were recomputed from scratch against our dataset ordering using the Morgan fingerprint similarity matrix, ensuring correct index alignment between the retrieval file and the dataset.
+
+**Condition 2 — Pathway + RJ prompts:** Teacher prompted with RJ prompts (PK/PD flag + prodrug warnings + raised truncation caps) and pathway-retrieved examples. Pathway retrievals are computed on the fly using `compute_pathway_retrievals()`.
+
+**Teacher model:** Llama-3.3-70B-Instruct on 4× NVIDIA H100 80GB GPUs via vLLM with tensor parallelism. Batch size 32, temperature 0.6, max 1,536 new tokens.
+
+**Quality metric:** Grounded factuality score — the fraction of pharmacological entities mentioned in the trace (CYP enzymes, transporters, targets) that are present in the drug profiles from DrugBank. Scored by `src/grounded_factuality.py`. This measures whether the teacher's reasoning is anchored to real pharmacological data rather than hallucinated.
+
+**Checkpointing:** Both trace files are JSONL-appended. If the job is killed and restarted, generation resumes from the last completed pair. Safe to run across multiple SLURM submissions.
+
+---
+
+### Implementation Notes
+
+Setting up this experiment on the Alliance Canada Nibi cluster required resolving several non-trivial technical issues. The most significant was an index alignment bug: `pd.concat(..., ignore_index=True)` in the sampling function reset the dataframe index before the original train_df row numbers were saved, causing retrieval lookups to silently fetch examples for the wrong drug pairs entirely. Both conditions received mismatched examples and produced near-identical scores as a result. The bug was identified by cross-checking sampled pair identities against retrieval file keys, confirmed, and fixed by preserving original indices before concatenation.
+
+A second issue was that Mohammadreza's precomputed Tanimoto retrieval file was built against a different extraction ordering of the DrugBank XML than our dataset. Rather than attempting to align the two orderings, Tanimoto retrievals were recomputed from scratch against our dataset using the existing Morgan fingerprint similarity matrix, ensuring correct correspondence between retrieval keys and dataset row indices.
+
+---
+
+### Results
+
+The corrected experiment is currently running (SLURM job 12298450, Nibi cluster, submitted April 16 2026). Results will be added here upon completion.
+
+The primary comparison will be:
+- Mean grounded factuality score: Tanimoto condition vs Pathway + RJ condition
+- Per-tier breakdown: head, mid, tail
+- Prodrug-specific slice: F1 on the 8.3% of pairs involving prodrugs, where 
+  direction-of-effect errors are most likely
+
+If grounded factuality scores differ significantly between conditions, this provides evidence that retrieval strategy and prompt quality affect teacher reasoning. If scores are similar, it suggests either that grounded factuality is not sensitive enough to detect the difference — it checks entity presence but not directional correctness — or that the improvements manifest downstream 
+in student training rather than in raw trace scores.
