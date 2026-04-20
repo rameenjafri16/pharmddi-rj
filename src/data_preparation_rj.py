@@ -219,7 +219,27 @@ def build_teacher_prompt(row, label_map, profiles, retrieved_examples=None):
     if p2:
         parts.append(_format_drug_profile(p2))
 
-    severity = row.get("severity", "Unknown")
+    # ── Severity: use classifier if DDInter label missing or teacher-generated ──
+    # 83.8% of pairs have Unknown severity. Teacher severity is 92.4% Major
+    # (hallucinated). Rule-based classifier provides evidence-based labels.
+    severity = str(row.get("severity", "Unknown"))
+    severity_source = str(row.get("severity_source", "none"))
+    if severity == "Unknown" or severity_source == "teacher":
+        try:
+            from src.severity_classifier import classify_severity as _clf_sev
+            _result = _clf_sev(
+                drug1_id=str(row["drug1_id"]),
+                drug2_id=str(row["drug2_id"]),
+                label_text=str(row.get("label_text", "")),
+                profiles=profiles,
+                drug1_name=str(row.get("drug1_name", "")),
+                drug2_name=str(row.get("drug2_name", "")),
+            )
+            if _result["severity"] != "Unknown":
+                severity = _result["severity"]
+        except Exception:
+            pass  # fall back gracefully if classifier unavailable
+    severity = severity  # final value used below
     parts.append(f"Known interaction: Y={row['label']} -- \"{row['label_text']}\"")
     parts.append(f"Known severity: {severity}")
     parts.append("")
@@ -267,6 +287,33 @@ def build_teacher_prompt(row, label_map, profiles, retrieved_examples=None):
         "how they combine to produce this effect. Then provide a concise summary. "
         "End with the classification and severity."
     )
+    # ── No shared pathway note ──────────────────────────────────────────────
+    # When drugs share no common enzymes/transporters/targets, the teacher
+    # has no pathway anchor. Tell it to reason pharmacodynamically instead.
+    try:
+        from src.pathway_retrieval import _extract_pathway_nodes
+        _p1_nodes = _extract_pathway_nodes(p1) if p1 else {}
+        _p2_nodes = _extract_pathway_nodes(p2) if p2 else {}
+        # Check overlap across all three annotation types
+        _shared = (
+            set(_p1_nodes.get("enzymes", {})) & set(_p2_nodes.get("enzymes", {})) |
+            set(_p1_nodes.get("transporters", {})) & set(_p2_nodes.get("transporters", {})) |
+            set(_p1_nodes.get("targets", {})) & set(_p2_nodes.get("targets", {}))
+        )
+        _has_data = any(_p1_nodes.get(k) for k in ("enzymes","transporters","targets")) or                     any(_p2_nodes.get(k) for k in ("enzymes","transporters","targets"))
+        if not _shared and _has_data:
+            parts.append(
+                "⚠️  NOTE: These two drugs share NO common enzymes, transporters, "
+                "or targets in DrugBank. There is no direct pharmacokinetic pathway "
+                "connecting them. Focus your reasoning on pharmacodynamic mechanisms "
+                "— do both drugs act on the same receptor, ion channel, or "
+                "physiological system? Do NOT invoke CYP enzyme reasoning unless "
+                "the drug profiles above explicitly show CYP involvement."
+            )
+            parts.append("")
+    except Exception:
+        pass  # pathway retrieval not available
+
     return "\n".join(parts)
 
 
