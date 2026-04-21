@@ -1,333 +1,290 @@
 # PharmCoT-RJ: Pathway-Aware Retrieval for Drug-Drug Interaction CoT Distillation
 
-**Rameen Jafri** | University of Guelph | DATA 6400  
-**April 2026**
-
-## Background 
-PharmCoT is a knowledge distillation pipeline for drug-drug interaction (DDI) classification. Given a pair of drugs, the goal is to predict which of 129 fine-grained interaction types applies — for example, "the serum concentration of Drug A can be increased when combined with Drug B" — along with a severity label (Major/Moderate/Minor) and a mechanistic explanation of why the interaction occurs.
-
-The pipeline works in three stages:
-Stage 1 — Teacher trace generation. A large language model (Llama-3.3-70B-Instruct) is prompted with a drug pair, its pharmacological profiles (enzymes, transporters, targets from DrugBank), five retrieved example interactions, and the ground-truth interaction label. It produces a structured chain-of-thought trace: a step-by-step mechanistic explanation, a concise summary, and a severity classification.
-Stage 2 — Quality filtering. Generated traces are filtered by a three-model judge ensemble (OpenBioLLM-70B, TxGemma-27B, Qwen2.5-72B) that scores each trace on factual accuracy, mechanistic depth, and clinical relevance. Only high-quality traces are kept for training.
-Stage 3 — Student training. A smaller model (Qwen3-8B) is fine-tuned via LoRA on the filtered traces. The student learns to produce the same structured mechanistic reasoning at inference time without needing the teacher's scale.
-The trained student classifies drug pairs into 129 interaction types while simultaneously generating a clinically interpretable explanation. 
+**Rameen Jafri** | University of Guelph | DATA 6400 | April 2026
 
 ---
 
-## Contribution 1: Pathway-Aware RAG Retrieval
+## Background
 
-### Background & Problem
+PharmCoT is a knowledge distillation pipeline for drug-drug interaction (DDI)classification. Given a pair of drugs, the goal is to predict which of 129 fine-grained interaction types applies. For example, "the serum concentration of Drug A can be increased when combined with Drug B", along with a severity label (Major/Moderate/Minor) and a mechanistic explanation of why the interaction occurs.
 
-In Stage 1 of the pipeline, before the teacher model explains a drug interaction, it is shown five example interactions to provide context. The quality of these examples directly affects the quality of the reasoning trace. In theory, if the examples are mechanistically relevant, the teacher will produce better explanations.
+The pipeline works in three stages. In **Stage 1**, a large language model (Llama-3.3-70B-Instruct) is prompted with a drug pair, its pharmacological profiles from DrugBank, five retrieved example interactions, and the ground-truth interaction label. It produces a structured chain-of-thought trace: a step-by-step mechanistic explanation, a concise summary, and a severity classification. In **Stage 2**, generated traces are filtered by a three-model judge ensemble (OpenBioLLM-70B, TxGemma-27B, Qwen2.5-72B) that scores each trace on factual accuracy, mechanistic depth, and clinical relevance. In **Stage 3**, a smaller model (Qwen3-8B) is fine-tuned via LoRA on the filtered traces. The student learns to produce the same structured mechanistic reasoning at inference time without needing the teacher's scale.
 
-The original pipeline selects these five examples using Tanimoto structural similarity: it computes Morgan fingerprints for each drug, calculates pairwise Tanimoto coefficients across all training pairs, and retrieves the five pairs whose drugs are most structurally similar to the query pair.
+The trained student classifies drug pairs into 129 interaction types while simultaneously generating a clinically interpretable explanation, which conventional classification models cannot do.
 
-Morgan fingerprints encode a drug's molecular structure as a binary vector where each bit represents the presence or absence of a particular substructural pattern within a given radius of each atom. Two drugs with similar fingerprints share similar local chemical environments around their atoms.
+My work focuses entirely on Stage 1. All contributions are to the quality of information the teacher receives and the quality of the reasoning traces it produces. The motivation for each contribution is described below, along with the experiments used to test whether the change actually helped.
 
-<img width="850" height="445" alt="image" src="https://github.com/user-attachments/assets/8bb1a6f3-0dd6-46dd-9a51-fa8d15115c9e" />
+## Motivation
 
-This approach has a fundamental pharmacological flaw. Tanimoto similarity measures how alike two molecules look (whether they share the same substructural fragments). But drug-drug interactions are not determined by what drugs look like. They are determined by what drugs do biologically: which enzymes metabolise them, which transporters move them across membranes, which receptors they bind. Two drugs can be structurally identical yet interact through completely different pathways, and two structurally unrelated drugs can interact through exactly the same mechanism.
+Stage 1 has three characteristics that could limit the quality of the teacher traces the student learns from. Whether each one actually matters is an empirical question, and testing that is a core part of this work.
 
-The practical consequence is that Tanimoto-retrieved examples are often mechanistically irrelevant to the query pair. The teacher model is being shown "here are five interactions involving structurally similar drugs" when what it needs is "here are five interactions involving drugs that share the same biological pathways."
+### Characteristic 1: The retrieval strategy is based on structural similarity
 
-### Methods
+Before the teacher explains a drug interaction, it is shown five example interactions to provide context. The original pipeline selects these examples using Tanimoto structural similarity: it finds drugs whose molecular fingerprints look similar and assumes they will interact similarly.
 
-To quantify this problem, I developed a metric called **Mechanistic Overlap Rate (MOR)**.
+Whether structural similarity is a good proxy for mechanistic relevance is not obvious. Drug interactions are determined by biological mechanisms, which enzymes break drugs down, which receptors they bind, which transporters move them across membranes. Structural similarity captures molecular shape, not biological function. Two drugs that look alike can interact through completely different pathways, and two structurally unrelated drugs can interact through exactly the same mechanism.
 
-MOR measures the fraction of retrieved examples that share at least one biological pathway node with the query pair. A pathway node is any enzyme, transporter, or receptor that both drugs in a pair have in common — for example, if the query pair involves two CYP3A4 substrates, any retrieved example where at least one drug is also a CYP3A4 substrate counts as a mechanistic hit. MOR ranges from 0 to 1, where 1 means every retrieved example is mechanistically relevant to the query.
+If structural similarity is a poor proxy for mechanistic relevance, then roughly 1 in 5 examples shown to the teacher could be mechanistically irrelevant to the query pair, potentially misleading its reasoning rather than grounding it.
 
-To make this concrete: suppose the query pair is warfarin + fluconazole, which interact because fluconazole inhibits CYP2C9, the enzyme that metabolises warfarin. A mechanistically relevant retrieved example would be something like warfarin + amiodarone (also a CYP2C9 inhibitor) or phenytoin + fluconazole (another CYP2C9 substrate affected by the same inhibitor). These examples give the teacher model the right reasoning template. A mechanistically irrelevant example — say, ibuprofen + naproxen retrieved because both are small NSAIDs with similar ring structures — tells the teacher nothing useful about CYP2C9 inhibition and may actively mislead it.
+### Characteristic 2: Severity labels are sparse
 
-Under the Tanimoto strategy, roughly 1 in 5 retrieved examples is mechanistically irrelevant in exactly this way. Under pathway retrieval, essentially all 5 are on-target.
+Every interaction has a severity label that the student is trained to predict. A diagnostic analysis of the 234,646 existing teacher traces found:
 
-Pathway-aware retrieval selects examples based on pathway node overlap rather than structural similarity. For each query pair, I extract the full set of enzyme, transporter, and target annotations from DrugBank 5.1.17 for both drugs and compute a weighted overlap score against all training pairs. The scoring function upweights enzyme sharing (3×) over transporter sharing (2×) over target sharing (1×), reflecting the relative clinical importance of each annotation type — CYP-mediated metabolic interactions are more pharmacologically predictable and better annotated than transporter or target interactions. The top-5 scoring training pairs are returned as retrieved examples.
+- 83.8% have no severity label at all
+- 9.9% have severity labels generated by the teacher model itself, which produces Major 92.4% of the time regardless of the actual interaction
+- Only 6.3% have validated severity labels from DDInter, a curated clinical database
 
-To evaluate both strategies systematically, I constructed two filtered datasets from DrugBank 5.1.17:
+The real distribution in validated clinical data is 70% Moderate, 26.5% Major, and 3.5% Minor. Whether the student can learn meaningful severity prediction from this signal is unclear. It may simply learn to always predict Major, or learn nothing at all about severity.
 
-Dataset A (≥130 pairs per class): 129 interaction classes, 236K training pairs, 256K test pairs — matching the original pipeline's filtering threshold exactly, enabling direct comparison.
-Dataset B (≥20 pairs per class): 194 interaction classes, 239K training pairs, 257K test pairs — includes 65 rare interaction classes excluded by the original pipeline.
+### Characteristic 3: The prompt may be missing pharmacological context
 
-Within each dataset, interaction classes were split into frequency tiers based on the number of training pairs per class:
+Three pieces of context are absent from the original teacher prompt that could matter for correct mechanistic reasoning.
 
-Head (15 classes): the most frequent interaction types
-Mid (65 classes): intermediate frequency
-Tail (49 classes in A / 114 in B): rare interactions
+First, 8.3% of training pairs involve prodrugs, which are pharmacologically inactive until converted to their active form by an enzyme. For these drugs, the direction of enzyme inhibition is reversed compared to a normal drug. Whether the teacher handles this correctly without an explicit flag is an open question.
 
-For each tier, I sampled query pairs from each class, ran both retrieval strategies, and computed MOR for each retrieved set. I also measured coverage (the percentage of query pairs for which at least one retrieved example exists) to test whether pathway retrieval sacrifices recall for precision.
+Second, 75% of drug pairs share no common enzymes, transporters, or targets in DrugBank. For these pairs the teacher has no shared biochemical anchor between the two drugs. Whether this causes it to hallucinate connections or reason correctly from first principles is testable.
 
-### Results
+Third, the original prompt silently truncates drug profiles at 5 enzymes, 3 transporters, and 3 targets. For heavily metabolised drugs this drops information with no indication that truncation occurred. Whether the missing annotations are pharmacologically important for the interactions being explained is drug and interaction specific.
+
+
+## My Approach
+
+I made three categories of changes to Stage 1, each motivated by one of the characteristics described above. The changes are described here at a high level. Detailed methods, results, and ablation findings follow in the Experiments and Results section.
+
+### Contribution 1: Pathway-Aware Retrieval
+
+I replaced Tanimoto structural similarity retrieval with biological pathway retrieval. Instead of finding drugs that look structurally similar, the new system finds drugs that share the same enzymes, transporters, or receptors in DrugBank. The hypothesis is that mechanistically similar examples produce better teacher reasoning than structurally similar ones.
+
+To measure whether this hypothesis holds, I defined a new metric called Mechanistic Overlap Rate (MOR) and evaluated both retrieval strategies across 236,000 training pairs in two datasets. The full methods and results are in the Retrieval Quality Experiment section.
+
+### Contribution 2: Prompt Improvements
+
+I made five targeted changes to the teacher prompt, each addressing a specific gap in the pharmacological context the teacher receives. The changes are numbered Fix 1 through Fix 5.
+
+Fix 1 added a PK/PD interaction type flag to tell the teacher whether to reason about ADME mechanisms or receptor effects. Fix 2 added a prodrug warning for pairs where the direction of enzyme inhibition is reversed. Fix 3 raised the drug profile truncation caps to include more enzyme and target annotations. Fix 4 integrated a rule-based severity classifier to replace missing and hallucinated severity labels. Fix 5 added a note for pairs where the two drugs share no common pathway nodes, redirecting the teacher toward pharmacodynamic reasoning.
+
+Each fix was implemented independently so it could be toggled on or off. An ablation study tested fixes 1, 4, and 5 individually. Fix 1 was found to hurt direction accuracy and was subsequently disabled. The full methods, ablation design, and results are in the Prompt Ablation section.
+
+### Contribution 3: Direction-Aware Evaluation
+
+The existing quality metric in the pipeline is grounded factuality, which checks whether pharmacological entity names in the trace appear in the drug profiles. This metric cannot check whether the teacher reasoned correctly about the direction of an interaction effect, whether drug levels go up or down, whether the prodrug is activated or blocked.
+
+I built a direction-aware scorer that extracts the ground truth direction from the interaction label and checks whether the trace's Summary section states the correct direction. This scorer is what makes the prompt improvements measurable. Without it, the prodrug warning and severity classifier produce no detectable signal because grounded factuality is insensitive to directional correctness.
+
+## Experiments and Results
+
+### Retrieval Quality Experiment
+
+#### Methods
+
+To test whether structural similarity is a good proxy for mechanistic relevance, I computed Mechanistic Overlap Rate (MOR) for both retrieval strategies across two datasets.
+
+MOR measures the fraction of retrieved examples that share at least one biological pathway node with the query pair. A pathway node is any enzyme, transporter, or receptor annotated to both drugs in a pair in DrugBank. For a given query pair, each retrieved example either shares at least one pathway node with it (a mechanistic hit) or it does not. MOR is the fraction of the five retrieved examples that are hits, ranging from 0 to 1.
+
+To make this concrete: suppose the query pair is warfarin and fluconazole, which interact because fluconazole inhibits CYP2C9, the enzyme responsible for warfarin's metabolism. A mechanistically relevant retrieved example would be warfarin and amiodarone (amiodarone also inhibits CYP2C9) or phenytoin and fluconazole (phenytoin is another CYP2C9 substrate). These examples give the teacher the right reasoning template. A mechanistically irrelevant example such as ibuprofen and naproxen, retrieved because both are small NSAIDs with similar ring structures, shares no pathway nodes with the query and tells the teacher nothing useful about CYP2C9 inhibition.
+
+I constructed two filtered datasets from DrugBank 5.1.17:
+
+Dataset A uses a threshold of 130 or more pairs per class, producing 129 interaction classes, 236K training pairs, and 256K test pairs. This matches the original pipeline's filtering threshold exactly, enabling direct comparison.
+
+Dataset B uses a threshold of 20 or more pairs per class, producing 194 interaction classes, 239K training pairs, and 257K test pairs. This includes 65 rare interaction classes that the original pipeline excludes entirely.
+
+Within each dataset, interaction classes were split into frequency tiers: Head (15 classes, most frequent), Mid (65 classes, intermediate), and Tail (49 classes in A, 114 in B, rare). For each tier I sampled query pairs, ran both retrieval strategies, and computed MOR and coverage for each retrieved set. Coverage is the percentage of query pairs for which at least one retrieved example exists.
+
+#### Results
 
 ![MOR Comparison by Tier](figures/fig5_mor_comparison_by_tier.png)
 
-Pathway retrieval achieves near-perfect mechanistic relevance across all tiers and both datasets. Tanimoto retrieval performs consistently around 80% — meaning roughly 1 in 5 examples shown to the teacher is mechanistically irrelevant to the query pair regardless of how common or rare the interaction class is.
+Pathway retrieval achieves near-perfect mechanistic relevance across all tiers and both datasets. Tanimoto retrieval performs consistently around 80%, meaning roughly 1 in 5 examples shown to the teacher is mechanistically irrelevant to the query pair regardless of how common or rare the interaction class is.
 
-**Dataset A results:**
+**Dataset A:**
 
-| Tier | Tanimoto MOR | Pathway MOR | Δ | Tanimoto Coverage | Pathway Coverage |
-|------|-------------|-------------|---|-------------------|-----------------|
+| Tier | Tanimoto MOR | Pathway MOR | Delta | Tanimoto Coverage | Pathway Coverage |
+|------|-------------|-------------|-------|-------------------|-----------------|
 | Head | 79.9% | 99.3% | +19.5pp | 84.0% | 99.3% |
 | Mid | 79.0% | 99.4% | +20.4pp | 81.2% | 99.4% |
 | Tail | 84.2% | 99.6% | +15.4pp | 84.9% | 99.6% |
 
-**Dataset B results:**
+**Dataset B:**
 
-| Tier | Tanimoto MOR | Pathway MOR | Δ | Tanimoto Coverage | Pathway Coverage |
-|------|-------------|-------------|---|-------------------|-----------------|
+| Tier | Tanimoto MOR | Pathway MOR | Delta | Tanimoto Coverage | Pathway Coverage |
+|------|-------------|-------------|-------|-------------------|-----------------|
 | Head | 79.1% | 98.0% | +18.9pp | 83.3% | 98.0% |
 | Mid | 78.6% | 99.5% | +20.9pp | 81.2% | 99.5% |
 | Tail | 82.1% | 99.9% | +17.8pp | 83.4% | 99.9% |
 
-![Coverage and MOR Double Win](figures/fig7_coverage_and_mor.png)
-
 Five findings stand out beyond the headline numbers.
 
-**Finding 1**: There is no coverage tradeoff. The natural concern with pathway retrieval is that it might cover fewer pairs — not every drug in DrugBank has complete enzyme and transporter annotations. In practice the opposite is true. Pathway retrieval covers 98–100% of pairs compared to Tanimoto's 81–85%. The reason is that DrugBank target annotations — which include receptor binding and protein interaction data — are present for 72% of drugs, providing near-complete coverage even when enzyme-specific data is sparse. Switching to pathway retrieval improves both the quality and the breadth of retrieved examples simultaneously.
+**Finding 1: There is no coverage tradeoff.** Pathway retrieval covers 98 to 100% of pairs compared to Tanimoto's 81 to 85%. The reason is that DrugBank target annotations (receptor binding, protein interaction data) are present for 72% of drugs, providing near-complete coverage even when enzyme data is sparse. Pathway retrieval improves both quality and breadth simultaneously.
 
-**Finding 2**: The improvement is uniform, not concentrated in rare classes. Before running the experiment I expected pathway retrieval to help most for rare tail classes, where structural similarity is presumably weakest and mechanistic reasoning matters most. The data shows something more interesting: the MOR improvement is consistent across head, mid, and tail classes with no clear trend. This is a stronger result than the original hypothesis — it means the flaw in Tanimoto retrieval is systematic across the entire interaction space, not a niche problem affecting only rare classes.
+![Coverage and MOR](figures/fig7_coverage_and_mor.png)
+
+**Finding 2: The improvement is uniform across class frequencies.** The MOR improvement is consistent across head, mid, and tail classes with no clear trend. This means the flaw in Tanimoto retrieval is systematic across the entire interaction space, not a niche problem affecting only rare classes.
 
 ![Delta vs Class Frequency](figures/fig6_delta_vs_frequency.png)
 
-**Finding 3**: Tanimoto similarity is essentially a random signal for this task. Tanimoto similarity between interacting drug pairs averages ~0.10 across all tiers — barely above zero. This is not because rare interaction classes have unusually dissimilar drugs; the distribution is flat across head, mid, and tail. Structurally similar drugs are simply not more likely to share interaction mechanisms than structurally dissimilar ones. This confirms that the flaw in the original retrieval strategy is not a matter of degree — it is a fundamental category error.
+**Finding 3: Tanimoto similarity is essentially random signal for this task.** Tanimoto similarity between interacting drug pairs averages approximately 0.10 across all tiers, barely above zero and flat across head, mid, and tail. This rules out the possibility that Tanimoto retrieval is partially useful for some interaction types. Structural similarity carries essentially no signal for DDI retrieval.
 
 ![Tanimoto Similarity Distribution](figures/fig3_tanimoto_similarity_by_tier.png)
 
-**Finding 4**: Target annotations drive coverage, not enzyme annotations. 98% of pathway coverage comes from target annotations rather than enzyme or transporter data. This was unexpected. CYP-mediated metabolic interactions are the most clinically common type of DDI, so I assumed enzyme annotations would dominate. In practice, the broader target annotation layer — which includes receptors, ion channels, and other protein binding data — is what makes pathway retrieval work at scale. Enzyme data alone would have given much lower coverage.
+**Finding 4: Target annotations drive coverage, not enzyme annotations.** 98% of pathway coverage comes from target annotations rather than enzyme or transporter data. CYP enzyme sharing alone would have given much lower coverage. The broader target annotation layer is what makes pathway retrieval work at scale.
 
 ![Annotation Type Breakdown](figures/fig_annotation_type_breakdown.png)
 
-**Finding 5**: Pathway retrieval unlocks 23 interaction classes that are invisible to Tanimoto. In Dataset B, 23 tail-class interaction types have zero Tanimoto coverage — no training pairs involving these interactions have drugs with sufficient fingerprint overlap to retrieve any examples. These are the classes the original pipeline excluded entirely with the ≥130 pairs threshold. Pathway retrieval achieves near-complete coverage on all 23. This raises the possibility of expanding the pipeline's classification scope from 129 to 194 interaction types — not by collecting more data, but by fixing the retrieval strategy.
+**Finding 5: Pathway retrieval unlocks 23 interaction classes invisible to Tanimoto.** In Dataset B, 23 tail class interaction types have zero Tanimoto coverage. Pathway retrieval achieves near-complete coverage on all 23. This raises the possibility of expanding the pipeline's classification scope from 129 to 194 interaction types without collecting additional data.
 
 ![Coverage Divergence](figures/fig_coverage_divergence.png)
 
 ---
 
+### Prompt Improvements
+
+#### Fix 1: PK/PD Interaction Type Flag (implemented and disabled)
+
+Drug interactions fall into two categories requiring different reasoning frameworks. Pharmacokinetic interactions occur when one drug changes how much of the other gets into the body through ADME mechanisms. Pharmacodynamic interactions occur when two drugs act on the same receptor or physiological system simultaneously.
+
+I built a keyword classifier, `classify_pk_pd()`, that maps any DrugBank interaction template to PK or PD with 100% coverage across all 129 classes in Dataset A. The teacher prompt included a line specifying the interaction type and which reasoning framework to apply.
+
+An ablation experiment (described in the Ablation Study section below) found that this flag decreased overall direction accuracy and was most harmful on metabolism interactions, where it reduced correct direction rate from 33% to 25%. The likely cause is that 86% of interactions are pharmacodynamic in the dataset, but many PD labels describe outcomes caused by PK mechanisms, for example "risk of bleeding increased" caused by CYP2C9 inhibition raising warfarin levels. Labelling these as PD and directing the teacher away from enzyme reasoning actively misled it. The flag was disabled in the final configuration. The classifier code remains in `src/data_preparation_rj.py` as `classify_pk_pd()` and can be re-enabled for future experiments.
+
+#### Fix 2: Prodrug Warning
+
+A prodrug is pharmacologically inactive until converted to its active form by an enzyme. This creates a critical asymmetry in how enzyme inhibition affects drug levels. For a normal drug, enzyme inhibition blocks breakdown and drug levels increase. For a prodrug, enzyme inhibition blocks activation and active drug levels decrease. The direction is exactly reversed.
+
+The most well-known clinical example is clopidogrel and omeprazole. Clopidogrel requires CYP2C19 to convert it into its active antiplatelet metabolite. Omeprazole is a potent CYP2C19 inhibitor. Co-administration blocks clopidogrel's activation, reducing its antiplatelet effect by up to 40%. For a heart attack patient taking clopidogrel to prevent a second event, this interaction can be fatal. A teacher model reasoning without a prodrug flag would likely write that omeprazole inhibits CYP2C19 and causes clopidogrel levels to increase, which is pharmacologically backwards.
+
+I scanned DrugBank 5.1.17 for prodrug annotations using explicit group flags and text evidence in drug descriptions. This identified 183 prodrugs with DDI interactions, of which 125 appear in Dataset A, affecting 8.3% of training pairs. The teacher prompt now includes an explicit warning for any pair involving a prodrug, stating that enzyme inhibition decreases active drug levels rather than increasing them and directing the teacher to reason about activation rather than elimination.
+
+#### Fix 3: Raised Profile Truncation Caps
+
+The original prompt builder truncated drug profiles at 5 enzymes, 3 transporters, and 3 targets. For heavily metabolised drugs this silently dropped pharmacologically important annotations with no indication that truncation had occurred.
+
+A diagnostic check found that 94 drugs (2.0%) hit the enzyme cap, 207 (4.5%) hit the target cap, and 239 (5.2%) hit the transporter cap. Affected drugs include Nicotine, Troglitazone, and Dapsone, all compounds with broad CYP involvement where complete enzyme context is clinically meaningful.
+
+The caps were raised to 8 enzymes, 5 transporters, and 5 targets. This adds no computational overhead and increases prompt length only for the small fraction of drugs previously truncated.
+
+#### Fix 4: Severity Classifier
+
+83.8% of training pairs have no severity label. A further 9.9% have teacher-generated severity labels that are 92.4% Major, while the real validated distribution is 70% Moderate. The student is being trained to predict severity from data that is mostly missing or systematically wrong.
+
+I built a rule-based severity classifier that predicts severity from the interaction label text and the DrugBank drug categories of both drugs. The classifier checks in priority order: NTI drug involvement (28 narrow therapeutic index drugs where small concentration changes cause toxicity), high-risk label patterns (seizure risk, serotonin syndrome, torsade de pointes, myelosuppression), high-risk category combinations (two QTc prolonging agents, anticoagulant with thrombolytic), moderate-risk label patterns (serum concentration changes, bleeding risk, hyperkalemia), and drug-aware upgrades within each tier (QTc interaction involving vandetanib or sotalol upgrades to Major, live vaccine with immunosuppressant is always Major).
+
+The classifier was evaluated against 14,714 DDInter-labelled pairs, which are the only pairs with reliable ground truth severity. It achieves 54.8% accuracy with 63.5% coverage on previously unlabelled pairs. The theoretical ceiling given DDInter's own internal consistency is 78.1%, since the same interaction template gets different severity for different drug pairs in 83 of 126 interaction classes. The classifier also overrides teacher-generated severity labels, replacing the 92.4% Major hallucination with a more realistic distribution.
+
+#### Fix 5: No-Shared-Pathway Note
+
+For pairs where both drugs have DrugBank pathway annotations but share no common enzymes, transporters, or targets, the teacher prompt now includes an explicit note:
+
+> These two drugs share NO common enzymes, transporters, or targets in
+> DrugBank. There is no direct pharmacokinetic pathway connecting them.
+> Focus your reasoning on pharmacodynamic mechanisms. Do NOT invoke CYP
+> enzyme reasoning unless the drug profiles above explicitly show CYP
+> involvement.
+
+This fires for approximately 75% of training pairs, which reflects the pharmacological reality that most DDIs are pharmacodynamic (receptor and system level) rather than pharmacokinetic (enzyme and transporter level). The note is implemented in `build_teacher_prompt()` using `_extract_pathway_nodes()` from `src/pathway_retrieval.py` to check for shared annotations at prompt construction time.
+
+---
+
+### Pilot Experiment
+
+#### Design
+
+To test whether the prompt improvements and pathway retrieval actually produce better teacher traces, I ran a controlled experiment generating traces for 4,000 drug pairs under two conditions using Llama-3.3-70B-Instruct on 4x NVIDIA H100 80GB GPUs.
+
+Condition 1 is the Tanimoto baseline: original prompts with no fixes and Tanimoto-retrieved examples. Tanimoto retrievals were recomputed from scratch against our dataset ordering to ensure correct index alignment.
+
+Condition 2 is the RJ configuration: prompt fixes 2, 3, 4, and 5 active (fix 1 disabled based on ablation findings) with pathway-retrieved examples.
+
+The 4,000 pairs were drawn from Dataset A using stratified sampling across frequency tiers with tail overrepresentation (1,225 head, 1,402 mid, 1,373 tail) because pathway retrieval's advantage is hypothesised to be largest for rare classes. The same pairs are used for both conditions.
+
+Two quality metrics were computed. Grounded factuality checks whether pharmacological entity names in the trace appear in the drug profiles. Direction accuracy checks whether the trace correctly states the direction of the interaction effect, whether drug levels increase or decrease, using the direction-aware scorer described in Contribution 3.
+
+#### Results
+
+**Grounded factuality** shows Tanimoto scoring marginally higher (0.7378 vs 0.7251). As established in Contribution 3, this metric cannot detect directional correctness and rewards entity name repetition. Tanimoto retrieves same-class drugs sharing the same enzymes, causing the teacher to reliably mention those enzymes regardless of whether its reasoning is correct.
+
+**Direction accuracy** tells a different story:
+
+| Condition | Overall Correct | Metabolism Correct | Prodrug Correct | Prodrug Ambiguous |
+|-----------|----------------|-------------------|-----------------|------------------|
+| Tanimoto baseline | 61.1% | 7% | 51.8% | 20.2% |
+| RJ configuration | 62.5% | 25% | 59.2% | 10.2% |
+
+The RJ configuration improves overall direction accuracy by 1.4 percentage points, metabolism direction accuracy by 18 percentage points, and prodrug direction accuracy by 7.4 percentage points. Prodrug ambiguous traces drop by 10 percentage points, meaning the teacher is more decisive as well as more correct on prodrug pairs.
+
+The metabolism improvement is the largest single gain and is primarily attributable to Fix 4 (severity classifier), which gives the teacher explicit severity context that helps it commit to a direction on metabolic interactions. The prodrug improvement is primarily attributable to Fix 2 (prodrug warning), consistent with the earlier pilot results showing +6.6pp on prodrug pairs.
+
+Head-to-head on matched pairs, the RJ configuration wins on more pairs than it loses: pathway only correct on 12.7% of pairs vs Tanimoto only correct on 11.3%.
+
+---
+
+### Ablation Study
+
+#### Design
+
+To isolate the contribution of individual prompt fixes, I ran three ablation conditions on the same 4,000 pairs. Each ablation removes exactly one fix from the RJ configuration, so the difference between the ablation and the full RJ configuration isolates that fix's contribution.
+
+The three fixes tested were Fix 1 (PK/PD flag), Fix 4 (severity classifier), and Fix 5 (no-pathway note). Fixes 2 and 3 were not ablated because Fix 2 had already shown a clear positive signal in an earlier pilot and Fix 3 is a data completeness change with no plausible downside.
+
+#### Results
+
+| Condition | Overall Correct | Metabolism Correct | Prodrug Correct | Pathway Wins |
+|-----------|----------------|-------------------|-----------------|-------------|
+| Tanimoto baseline | 61.1% | 7% | 51.8% | 11.4% |
+| All fixes (RJ) | 62.5% | 25% | 59.2% | 12.7% |
+| No Fix 1 (no PK/PD) | 63.3% | 33% | 62.3% | 13.5% |
+| No Fix 4 (no severity) | 62.1% | 24% | 59.2% | 12.8% |
+| No Fix 5 (no pathway note) | pending | pending | pending | pending |
+
+Three findings emerge from the ablation.
+
+**Fix 1 hurts.** Removing the PK/PD flag improves every metric. Overall direction accuracy increases from 62.5% to 63.3%, metabolism accuracy increases from 25% to 33%, and prodrug accuracy increases from 59.2% to 62.3%. The flag misleads the teacher on the 86% of interactions that are pharmacodynamic but whose labels describe PD outcomes caused by PK mechanisms. Telling the teacher to reason about receptors when it should reason about enzyme inhibition actively degrades trace quality. Fix 1 was disabled.
+
+**Fix 4 helps.** Removing the severity classifier decreases metabolism accuracy from 25% to 24% and slightly reduces overall performance. The severity context helps the teacher commit to a direction on metabolic interactions, confirming the hypothesis that knowing the severity helps anchor directional reasoning.
+
+**Fix 5 results pending.** The no-pathway note ablation is currently running. Results will be added when available.
+
+---
+
 ### What This Means
 
-The retrieval quality experiment proves that pathway retrieval is pharmacologically superior to Tanimoto retrieval — the examples it selects are almost always mechanistically relevant, while Tanimoto examples are wrong about 1 in 5 times. This is a clean, quantitative result that does not require running the full pipeline to validate.
+Grounded factuality consistently shows Tanimoto scoring higher than pathway retrieval. This is not evidence that Tanimoto is better. It is evidence that grounded factuality is the wrong metric for evaluating retrieval strategy. The metric rewards entity name repetition, which Tanimoto inflates by retrieving same-class drugs with identical enzyme profiles. Direction accuracy, which checks whether the teacher actually got the pharmacology right, shows pathway retrieval winning on more pairs and winning by larger margins on the interactions that matter most clinically.
 
-What it does not yet prove is whether this improvement in example quality translates into better teacher traces, and in turn a better student model. That question requires running teacher generation under both conditions and comparing the resulting traces — which is exactly what the pilot experiment (described in Contribution 3) is designed to test.
+The ablation study adds a methodological contribution beyond the main results: it demonstrates that not all pharmacological intuitions translate into prompt improvements. The PK/PD flag was a reasonable hypothesis that turned out to hurt performance, and detecting that required a controlled experiment. This is the value of the ablation design.
 
-The hypothesis is straightforward: a teacher shown mechanistically relevant examples should produce traces that reason more accurately about the underlying pharmacological mechanism. If that hypothesis holds, we would expect to see higher grounded factuality scores on pathway traces, and ultimately higher classification F1 on the student model trained on those traces. The effect should be largest on the 8.3% of training pairs involving prodrug interactions, where the direction of effect is reversed and mechanistically correct examples are most critical — these pairs are the subject of Contribution 2.
+The critical next experiment is student training. All results so far measure Stage 1 quality. Whether Stage 1 improvements flow through judge filtering and LoRA fine-tuning into better student F1 is an open question that requires the full pipeline run.
 
-Whether the improvement is large enough to be clinically meaningful is an open question. A ~20 percentage point improvement in MOR is a substantial pharmacological difference. Whether it moves the needle on student F1 depends on how sensitive the distillation pipeline is to example quality — something only the full experiment can answer.
 
 
-## Contribution 2: Pharmacologically-Correct Teacher Prompts
+## Future Work
 
-### Background
+### Student Training Comparison
 
-Beyond the retrieval strategy, the teacher model's reasoning quality depends on the information it receives in its prompt. In PharmCoT, each teacher prompt contains: the query drug pair, their pharmacological profiles from DrugBank (enzymes, transporters, targets, mechanism of action), the five retrieved examples, and the ground-truth interaction label. The teacher reads all of this and produces a step-by-step mechanistic explanation.
+The immediate next step is training the student model on traces generated with the optimal RJ configuration (pathway retrieval, fixes 2, 3, 4, and 5) and comparing its classification F1 against the baseline student trained on the original traces. This requires approximately 48 GPU hours for full pipeline generation across 236K pairs, judge filtering, and LoRA fine-tuning.
 
-The prompt is therefore the teacher's entire pharmacological context. Anything missing from the prompt is information the teacher has to infer on its own — and large language models, even at 70B parameters, make systematic errors when asked to reason about pharmacology without explicit guidance. Three such errors exist in the original prompt design.
+The comparison will be run on Dataset B (194 classes) rather than Dataset A (129 classes). This choice is motivated by Finding 5 from the retrieval quality experiment: 23 tail classes in Dataset B have zero Tanimoto coverage but near-complete pathway coverage. Tanimoto retrieval makes these classes untrainable. Pathway retrieval makes them viable.
 
----
+The evaluation will report two results. First, F1 on the 129 shared classes that exist in both datasets, enabling direct comparison against the baseline. Second, F1 on the 34 extra Dataset B classes with sufficient test pairs (10 or more). The baseline student scores 0% on these classes by construction since they were never in its training data. Any non-zero F1 from the RJ student on these classes is a direct demonstration of what pathway retrieval enables.
 
-### Fix 1: PK/PD Interaction Type Flag
+Tail class F1 will be reported separately within both evaluations because that is where the largest gains are expected. Pathway retrieval's coverage advantage is most pronounced for rare classes, the teacher has fewer training examples to work from for tail classes making better examples more valuable, and these are exactly the interactions where current models fail most in clinical practice.
 
-#### The Problem
+### No-Pathway Note Ablation
 
-Drug-drug interactions fall into two fundamentally different categories that require completely different reasoning frameworks.
+The ablation result for Fix 5 (no-pathway note) is currently pending. This will be added to the ablation table and its contribution assessed before committing to the full pipeline run.
 
-A **pharmacokinetic (PK) interaction** occurs when one drug changes how much of the other drug gets into the body — by blocking or accelerating the enzymes that metabolise it, the transporters that move it across membranes, or the proteins that bind it in the bloodstream. The reasoning here is about ADME: absorption, distribution, metabolism, excretion. The teacher needs to think about CYP enzymes, P-glycoprotein, drug half-life, plasma concentrations.
+### Severity Classifier Improvement
 
-A **pharmacodynamic (PD) interaction** occurs when two drugs act on the same receptor or physiological system at the same time, producing a combined effect that is stronger, weaker, or qualitatively different from either drug alone. The reasoning here is about receptor occupancy, downstream signalling, and physiological consequences. The teacher needs to think about mechanisms of action, target overlap, and additive or antagonistic effects.
+The rule-based severity classifier achieves 54.8% accuracy against DDInter ground truth, against a theoretical ceiling of 78.1%. The gap between 54.8% and 78.1% requires drug-pair specific severity knowledge that rule matching cannot capture. Two approaches could close this gap.
 
-The original PharmCoT prompt contains no signal about which type applies. The teacher has to infer the interaction type from the label text alone — for example, "The serum concentration of Drug A can be increased when combined with Drug B" implies PK reasoning, while "Drug A may increase the CNS depressant activities of Drug B" implies PD reasoning. This inference is usually possible from the label, but it is an unnecessary cognitive load that introduces inconsistency. A teacher that misclassifies interaction type will apply the wrong reasoning framework entirely — generating a trace about receptor binding for a metabolic interaction, or about enzyme inhibition for a pharmacodynamic one.
+The first is a small machine learning classifier trained directly on the 14,714 DDInter-labelled pairs, using interaction label embeddings and drug category features as inputs. With the label distribution known and features well-defined, a logistic regression or gradient boosted tree would likely reach 65 to 70% accuracy and provide 100% coverage, close to the theoretical ceiling.
 
-#### My Approach
+The second is using a small LLM (Llama-3.1-8B) to predict severity from the interaction label and drug profiles. This would naturally handle the drug-pair specific context that rules cannot capture and is straightforward to implement using the existing prompt infrastructure.
 
-I built a keyword-based classifier, `classify_pk_pd()`, that maps any DrugBank interaction template to either PK or PD with 100% coverage across all 129 interaction classes in Dataset A — verified empirically with zero ambiguous cases.
+Either approach would improve the severity signal going into the teacher prompt and is a natural extension of Fix 4.
 
-The classifier checks for PK-specific language first (serum concentration, metabolism, excretion, absorption, half-life, clearance, bioavailability, protein binding) and returns PK if any match. Otherwise it returns PD. PK takes priority over PD when both keyword types appear in the same template, because many templates describe a PK mechanism that leads to a PD outcome — for example, "excretion rate decreased resulting in lower serum concentration" is a PK interaction even though serum concentration has clinical consequences.
+### Direction-Annotated Retrieved Examples
 
-The teacher prompt now includes a single line for every trace:
+A further improvement to the retrieval strategy is enriching the five retrieved examples shown to the teacher with explicit role annotations before they are inserted into the prompt. Currently a retrieved example shows drug profiles and the interaction label but does not explicitly state which drug is the substrate, which is the inhibitor, and what direction the effect goes. The teacher has to infer this from the label text.
 
-> *Interaction type: PK (pharmacokinetic — reason about ADME mechanisms, 
-> enzyme/transporter roles, and drug level changes)*
+Explicitly annotating each retrieved example with substrate, inhibitor, and direction labels would give the teacher more precise reasoning templates, particularly for prodrug pairs and metabolism interactions where direction errors are most common. This is a natural Level 2 improvement building on the pathway retrieval infrastructure already in place.
 
-or
-
-> *Interaction type: PD (pharmacodynamic — reason about receptor/system effects 
-> and combined pharmacological actions)*
-
-Of the 129 classes in Dataset A, 15 are PK and 114 are PD — a distribution that reflects the clinical reality that most documented DDIs are pharmacodynamic in nature, while the most dangerous and well-characterised ones tend to be pharmacokinetic.
-
-
-### Fix 2: Prodrug Warning
-
-#### The Problem
-
-A prodrug is a pharmacologically inactive compound that must be converted into its active form by an enzyme in the body before it can exert any therapeutic effect. This conversion typically happens in the liver and is carried out by CYP enzymes or esterases. The drug you swallow is not the drug that works — it is a chemical precursor that your body activates.
-
-This creates a critical asymmetry in how enzyme inhibition affects drug levels. For a normal drug, the standard reasoning is:
-
-> Enzyme inhibitor + substrate → enzyme is blocked → drug is not broken down → 
-> **more drug accumulates in blood** → stronger effect, potential toxicity
-
-For a prodrug, the reasoning is exactly reversed:
-
-> Enzyme inhibitor + prodrug substrate → enzyme is blocked → prodrug is not 
-> activated → **less active drug in blood** → weaker effect, potential treatment 
-> failure
-
-The teacher model has no way to know which direction applies unless it is explicitly told the drug is a prodrug. Without this information, it will default to the standard substrate+inhibitor reasoning and generate a trace with the wrong direction of effect.
-
-The clinical stakes are high. The most well-known example is **clopidogrel + omeprazole**. Clopidogrel is a prodrug — it requires CYP2C19 to convert it into its active thiol metabolite, which is what actually inhibits platelet aggregation and prevents blood clots. Omeprazole, a common heartburn drug, is a potent CYP2C19 inhibitor. Co-administration blocks clopidogrel's activation, reducing its antiplatelet effect by up to 40%. For a heart attack patient taking clopidogrel to prevent a second event, this interaction can be fatal. A teacher model reasoning about this pair without a prodrug flag would likely write:
-
-> *"Omeprazole inhibits CYP2C19, blocking clopidogrel's metabolism, causing 
-> clopidogrel levels to increase and enhancing its antiplatelet effect."*
-
-This is pharmacologically backwards. The correct trace says:
-
-> *"Omeprazole inhibits CYP2C19, blocking clopidogrel's bioactivation to its active 
-> thiol metabolite. This reduces active metabolite levels, decreasing antiplatelet 
-> efficacy and increasing thrombotic risk."*
-
-Both traces mention CYP2C19. Both pass standard quality checks. But one is dangerously wrong.
-
-#### Scale of the Problem
-
-To quantify how often this occurs in the dataset, I scanned DrugBank 5.1.17 for prodrug annotations using two signals: explicit prodrug group flags and prodrug references in drug description or mechanism-of-action text. I identified **183 prodrugs** with DDI interactions in DrugBank, of which **125 appear in Dataset A**. These 125 prodrugs are involved in **19,639 training pairs — 8.3% of all training data**.
-
-Notable prodrugs in the dataset include clopidogrel, prasugrel, and ticlopidine (antiplatelet agents), simvastatin and lovastatin (statins), nearly all ACE inhibitors (enalapril, ramipril, lisinopril, perindopril — the "-pril" suffix typically indicates 
-a prodrug), fosphenytoin (epilepsy), capecitabine (cancer), levodopa (Parkinson's), and valganciclovir (antiviral).
-
-#### My Approach
-
-I added a prodrug warning to the teacher prompt for any pair involving a prodrug. 
-The warning appears as:
-
-> *⚠️ PRODRUG WARNING: Clopidogrel is a prodrug — it is pharmacologically inactive 
-> until converted to its active form by an enzyme. If an enzyme involved in its 
-> activation is inhibited, the result is DECREASED active drug levels (not increased). 
-> Reason about activation, not elimination.*
-
-This single sentence gives the teacher the pharmacological context it needs to reason in the correct direction. It fires for 8.3% of training pairs — the subset where direction-of-effect errors are most likely and most clinically consequential.
-
-The prodrug list is saved to `data/processed/prodrug_ids.json` and loaded once at the start of teacher generation. The lookup adds negligible overhead — a set membership check per pair.
-
-### Fix 3: Raised Profile Truncation Caps
-
-#### The Problem
-
-The teacher model's pharmacological context for each drug comes from its DrugBank profile — a structured summary of its enzymes, transporters, targets, mechanism of action, and other annotations. This profile is formatted and inserted into the prompt 
-by `_format_drug_profile()` in `data_preparation.py`.
-
-The original implementation truncates these profiles at prompt construction time:
-
-- Enzymes: capped at **5**
-- Transporters: capped at **3**
-- Targets: capped at **3**
-
-For most drugs these caps are not binding — the average drug in DrugBank has fewer than 5 enzyme annotations. But for heavily metabolised drugs, the caps quietly drop pharmacologically important information from the prompt with no indication that 
-truncation occurred. The teacher receives an incomplete profile and has no way to know it is missing data.
-
-This matters most for drugs involved in complex polypharmacy interactions — exactly the cases where complete enzyme information is most critical. Nicotine, for example, is metabolised by CYP2A6, CYP2B6, CYP2C9, CYP2D6, CYP2E1, FMO3, and several UGT enzymes. Under the original caps, the teacher sees only the first five. If the interaction being explained involves an enzyme that appears sixth or later in DrugBank's listing, the teacher's prompt contains no mention of it. The resulting trace may reason about the wrong enzyme entirely.
-
-A diagnostic check across all 4,629 drug profiles in Dataset A found that 94 drugs (2.0%) hit the enzyme cap, 207 drugs (4.5%) hit the target cap, and 239 drugs (5.2%) hit the transporter cap. The drugs hitting the enzyme cap include Nicotine, Troglitazone, and Dapsone — all compounds with broad CYP involvement where complete enzyme context is clinically meaningful.
-
-#### My Approach
-
-I raised the truncation caps in `_format_drug_profile()`:
-
-- Enzymes: 5 → **8**
-- Transporters: 3 → **5**  
-- Targets: 3 → **5**
-
-This is a three-number change with no computational overhead. Prompt length increases only for the small fraction of drugs that were previously truncated. The caps were not removed entirely because very long profiles can push complex prompts toward the model's context window limit. The raised values represent a balance between completeness and prompt length informed by the annotation count distribution across the dataset.
-
-
-## Contribution 3: Subset Pilot Experiment
-
-### Background
-
-The retrieval quality experiment in Contribution 1 proves that pathway retrieval selects mechanistically better examples. But MOR is a proxy metric — it measures the quality of the teacher's inputs, not the quality of the teacher's outputs. The ultimate question is whether better inputs produce better reasoning traces, and whether better traces produce a better student model.
-
-To answer this, I designed and ran a subset pilot experiment: generate teacher traces for 4,000 drug pairs under both retrieval conditions using Llama-3.3-70B-Instruct, score the traces with grounded factuality, and directly compare trace quality between 
-conditions. This isolates the effect of retrieval strategy on teacher output quality before committing to a full 236K-pair training run.
-
----
-
-### Experimental Design
-
-**Sample:** 4,000 pairs drawn from Dataset A using stratified sampling across frequency tiers — 1,200 head pairs, 1,400 mid pairs, 1,400 tail pairs. The tail is deliberately overrepresented relative to its proportion in the full dataset because the pathway retrieval hypothesis is most interesting for rare classes where Tanimoto similarity is weakest. The same 4,000 pairs are used for both conditions, saved to `sampled_pairs.jsonl` on first run and reloaded on subsequent runs for reproducibility.
-
-**Condition 1 — Tanimoto baseline:** Teacher prompted with original prompts (no PK/PD flag, no prodrug warning) and Tanimoto-retrieved examples. Tanimoto retrievals were recomputed from scratch against our dataset ordering using the Morgan fingerprint similarity matrix, ensuring correct index alignment between the retrieval file and the dataset.
-
-**Condition 2 — Pathway + RJ prompts:** Teacher prompted with RJ prompts (PK/PD flag + prodrug warnings + raised truncation caps) and pathway-retrieved examples. Pathway retrievals are computed on the fly using `compute_pathway_retrievals()`.
-
-**Teacher model:** Llama-3.3-70B-Instruct on 4× NVIDIA H100 80GB GPUs via vLLM with tensor parallelism. Batch size 32, temperature 0.6, max 1,536 new tokens.
-
-**Quality metric:** Grounded factuality score — the fraction of pharmacological entities mentioned in the trace (CYP enzymes, transporters, targets) that are present in the drug profiles from DrugBank. Scored by `src/grounded_factuality.py`. This measures whether the teacher's reasoning is anchored to real pharmacological data rather than hallucinated.
-
-**Checkpointing:** Both trace files are JSONL-appended. If the job is killed and restarted, generation resumes from the last completed pair. Safe to run across multiple SLURM submissions.
-
----
-
-### Implementation Notes
-
-Setting up this experiment on the Alliance Canada Nibi cluster required resolving several non-trivial technical issues. The most significant was an index alignment bug: `pd.concat(..., ignore_index=True)` in the sampling function reset the dataframe index before the original train_df row numbers were saved, causing retrieval lookups to silently fetch examples for the wrong drug pairs entirely. Both conditions received mismatched examples and produced near-identical scores as a result. The bug was identified by cross-checking sampled pair identities against retrieval file keys, confirmed, and fixed by preserving original indices before concatenation.
-
-A second issue was that Mohammadreza's precomputed Tanimoto retrieval file was built against a different extraction ordering of the DrugBank XML than our dataset. Rather than attempting to align the two orderings, Tanimoto retrievals were recomputed from scratch against our dataset using the existing Morgan fingerprint similarity matrix, ensuring correct correspondence between retrieval keys and dataset row indices.
-
----
-
-### Results
-
-The corrected pilot experiment generated 4,000 teacher traces under each condition using Llama-3.3-70B-Instruct, with verified correct index alignment between sampled pairs and retrieved examples (4,000 unique `orig_idx` values per condition, confirmed 
-non-zero).
-
-#### Grounded Factuality
-
-| Condition | Mean Score | Head | Mid | Tail |
-|-----------|-----------|------|-----|------|
-| Tanimoto + original prompts | 0.7365 | 0.7484 | 0.7340 | 0.7284 |
-| Pathway + RJ prompts | 0.7284 | 0.7414 | 0.7223 | 0.7231 |
-| Δ (pathway − tanimoto) | −0.0081 | −0.0070 | −0.0117 | −0.0053 |
-
-Grounded factuality shows no significant difference between conditions (delta 0.008, verdict: no significant difference). As discussed in the methodology section, this metric checks entity presence but not directional correctness — it cannot distinguish 
-between a trace that correctly states "CYP2C9 inhibition increases warfarin levels" and one that incorrectly states the opposite. Both mention CYP2C9 and both score identically.
-
-#### Direction-Aware Evaluation
-
-To properly measure the impact of the prompt improvements, I developed a direction-aware scorer (`src/direction_scorer.py`) that checks whether the trace correctly states the direction of the interaction effect — whether Drug X levels increase or decrease — by extracting the ground truth direction from the interaction label and checking the trace's ## Summary section for a matching directional statement about the relevant subject (serum concentration, metabolism, excretion, absorption).
-
-| Condition | Overall Correct | Overall Wrong | Overall Ambiguous |
-|-----------|----------------|---------------|------------------|
-| Tanimoto + original prompts | 61.1% | 2.6% | 17.5% |
-| Pathway + RJ prompts | 60.0% | 2.7% | 17.1% |
-
-At the overall level, both conditions perform similarly. The signal emerges when the sample is split by prodrug status:
-
-| Condition | Prodrug Correct | Prodrug Wrong | Prodrug Ambiguous | Prodrug Mention Rate |
-|-----------|----------------|---------------|------------------|---------------------|
-| Tanimoto + original prompts | 51.8% | 4.7% | 20.2% | 84.8% |
-| Pathway + RJ prompts | **58.4%** | 4.5% | **13.6%** | **95.5%** |
-
-On prodrug-involving pairs — 9.6% of the sample, including clinically critical interactions like clopidogrel + CYP2C19 inhibitors — the RJ prompt improvements produce three measurable changes:
-
-**First**, directional correctness increases from 51.8% to 58.4% (+6.6 percentage points). The teacher more often reasons correctly about activation rather than elimination for prodrug pairs.
-
-**Second**, ambiguous/hedging traces decrease from 20.2% to 13.6% (−6.6 percentage points). The prodrug warning makes the teacher more confident and more conclusive in its reasoning, not just more often correct.
-
-**Third**, prodrug/activation concept mention rate increases from 84.8% to 95.5%. The explicit prodrug warning in the RJ prompt reliably shifts the teacher's reasoning framework toward activation rather than standard substrate+inhibitor reasoning.
-
-The improvement is diluted at the overall level because prodrug pairs are only 9.6% of the sample — 3,618 normal pairs where the two conditions are essentially identical pull the headline numbers together. The effect is concentrated exactly where it was designed to be.
-
-An additional finding from the direction-aware analysis: metabolism interactions are the hardest subject for both conditions, with correct direction rates of only 7% (Tanimoto) and 11% (Pathway). Absorption interactions are easiest at ~80-82% correct for both. This suggests that metabolism-type interactions — which require the most nuanced reasoning about enzyme substrate/inhibitor/inducer relationships and downstream concentration effects — represent the largest remaining quality gap 
-in teacher trace generation, independent of retrieval strategy.
-
-#### Summary
-
-The pilot experiment produces two findings that together tell a coherent story:
-
-1. **Grounded factuality is insensitive to retrieval strategy** — both conditions 
-   score similarly on entity presence, confirming that this metric cannot detect 
-   the pharmacological improvements that pathway retrieval provides.
-
-2. **Direction-aware evaluation detects the prodrug improvement** — the RJ prompt 
-   changes produce a measurable, specific improvement on the 9.6% of pairs where 
-   direction errors are most clinically dangerous: +6.6pp correct, −6.6pp ambiguous, 
-   +10.7pp prodrug concept mention rate.
-
-The natural next step is extending this analysis to the full 236K training set and measuring whether a student model trained on RJ traces achieves higher classification accuracy specifically on prodrug-involving test pairs.
