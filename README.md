@@ -63,7 +63,7 @@ I made five targeted changes to the teacher prompt, each addressing a specific g
 
 Fix 1 added a PK/PD interaction type flag to tell the teacher whether to reason about ADME mechanisms or receptor effects. Fix 2 added a prodrug warning for pairs where the direction of enzyme inhibition is reversed. Fix 3 raised the drug profile truncation caps to include more enzyme and target annotations. Fix 4 integrated a rule-based severity classifier to replace missing and hallucinated severity labels. Fix 5 added a note for pairs where the two drugs share no common pathway nodes, redirecting the teacher toward pharmacodynamic reasoning.
 
-Each fix was implemented independently so it could be toggled on or off. An ablation study tested fixes 1, 4, and 5 individually. Fix 1 was found to hurt direction accuracy and was subsequently disabled. The full methods, ablation design, and results are in the Prompt Ablation section.
+Each fix was implemented independently so it could be toggled on or off. An ablation study tested fixes 1, 2, 4, and 5 individually. Fix 1 was found to hurt direction accuracy and was subsequently disabled. The full methods, ablation design, and results are in the Ablation Study section.
 
 ### Contribution 3: Direction-Aware Evaluation
 
@@ -155,6 +155,8 @@ The most well-known clinical example is clopidogrel and omeprazole. Clopidogrel 
 
 I scanned DrugBank 5.1.17 for prodrug annotations using explicit group flags and text evidence in drug descriptions. This identified 183 prodrugs with DDI interactions, of which 125 appear in Dataset A, affecting 8.3% of training pairs. The teacher prompt now includes an explicit warning for any pair involving a prodrug, stating that enzyme inhibition decreases active drug levels rather than increasing them and directing the teacher to reason about activation rather than elimination.
 
+The ablation result for Fix 2 is currently running and will be added when available.
+
 #### Fix 3: Raised Profile Truncation Caps
 
 The original prompt builder truncated drug profiles at 5 enzymes, 3 transporters, and 3 targets. For heavily metabolised drugs this silently dropped pharmacologically important annotations with no indication that truncation had occurred.
@@ -163,6 +165,8 @@ A diagnostic check found that 94 drugs (2.0%) hit the enzyme cap, 207 (4.5%) hit
 
 The caps were raised to 8 enzymes, 5 transporters, and 5 targets. This adds no computational overhead and increases prompt length only for the small fraction of drugs previously truncated.
 
+A separate ablation was not run for this fix because the affected drug fraction (2 to 5%) is too small to produce a detectable signal at 4,000 pairs, and because all experimental conditions including the Tanimoto baseline already used raised caps, making a comparable ablation baseline unavailable.
+
 #### Fix 4: Severity Classifier
 
 83.8% of training pairs have no severity label. A further 9.9% have teacher-generated severity labels that are 92.4% Major, while the real validated distribution is 70% Moderate. The student is being trained to predict severity from data that is mostly missing or systematically wrong.
@@ -170,6 +174,8 @@ The caps were raised to 8 enzymes, 5 transporters, and 5 targets. This adds no c
 I built a rule-based severity classifier that predicts severity from the interaction label text and the DrugBank drug categories of both drugs. The classifier checks in priority order: NTI drug involvement (28 narrow therapeutic index drugs where small concentration changes cause toxicity), high-risk label patterns (seizure risk, serotonin syndrome, torsade de pointes, myelosuppression), high-risk category combinations (two QTc prolonging agents, anticoagulant with thrombolytic), moderate-risk label patterns (serum concentration changes, bleeding risk, hyperkalemia), and drug-aware upgrades within each tier (QTc interaction involving vandetanib or sotalol upgrades to Major, live vaccine with immunosuppressant is always Major).
 
 The classifier was evaluated against 14,714 DDInter-labelled pairs, which are the only pairs with reliable ground truth severity. It achieves 54.8% accuracy with 63.5% coverage on previously unlabelled pairs. The theoretical ceiling given DDInter's own internal consistency is 78.1%, since the same interaction template gets different severity for different drug pairs in 83 of 126 interaction classes. The classifier also overrides teacher-generated severity labels, replacing the 92.4% Major hallucination with a more realistic distribution.
+
+The ablation study found that removing Fix 4 decreases metabolism direction accuracy from 25% to 24%, confirming a small positive contribution from the severity context.
 
 #### Fix 5: No-Shared-Pathway Note
 
@@ -182,6 +188,8 @@ For pairs where both drugs have DrugBank pathway annotations but share no common
 > involvement.
 
 This fires for approximately 75% of training pairs, which reflects the pharmacological reality that most DDIs are pharmacodynamic (receptor and system level) rather than pharmacokinetic (enzyme and transporter level). The note is implemented in `build_teacher_prompt()` using `_extract_pathway_nodes()` from `src/pathway_retrieval.py` to check for shared annotations at prompt construction time.
+
+The ablation study found that removing Fix 5 causes the largest single degradation in metabolism direction accuracy, dropping from 25% to 8%. This confirms that the note is doing important work redirecting the teacher away from hallucinated CYP reasoning on pairs with no shared pathway nodes.
 
 ---
 
@@ -222,9 +230,9 @@ Head-to-head on matched pairs, the RJ configuration wins on more pairs than it l
 
 #### Design
 
-To isolate the contribution of individual prompt fixes, I ran three ablation conditions on the same 4,000 pairs. Each ablation removes exactly one fix from the RJ configuration, so the difference between the ablation and the full RJ configuration isolates that fix's contribution.
+To isolate the contribution of individual prompt fixes, I ran ablation conditions on the same 4,000 pairs. Each ablation removes exactly one fix from the RJ configuration, so the difference between the ablation and the full RJ configuration isolates that fix's contribution.
 
-The three fixes tested were Fix 1 (PK/PD flag), Fix 4 (severity classifier), and Fix 5 (no-pathway note). Fixes 2 and 3 were not ablated because Fix 2 had already shown a clear positive signal in an earlier pilot and Fix 3 is a data completeness change with no plausible downside.
+Fixes 1, 2, 4, and 5 were ablated. Fix 3 was not ablated because the affected drug fraction (2 to 5%) is too small to produce a detectable signal at 4,000 pairs, and because all experimental conditions including the Tanimoto baseline used raised caps, making a comparable baseline unavailable.
 
 #### Results
 
@@ -233,17 +241,21 @@ The three fixes tested were Fix 1 (PK/PD flag), Fix 4 (severity classifier), and
 | Tanimoto baseline | 61.1% | 7% | 51.8% | 11.4% |
 | All fixes (RJ) | 62.5% | 25% | 59.2% | 12.7% |
 | No Fix 1 (no PK/PD) | 63.3% | 33% | 62.3% | 13.5% |
+| No Fix 2 (no prodrug) | pending | pending | pending | pending |
 | No Fix 4 (no severity) | 62.1% | 24% | 59.2% | 12.8% |
-| No Fix 5 (no pathway note) | pending | pending | pending | pending |
+| No Fix 5 (no pathway note) | 60.3% | 8% | 59.2% | 11.8% |
 
 Three findings emerge from the ablation.
 
-**Fix 1 hurts.** Removing the PK/PD flag improves every metric. Overall direction accuracy increases from 62.5% to 63.3%, metabolism accuracy increases from 25% to 33%, and prodrug accuracy increases from 59.2% to 62.3%. The flag misleads the teacher on the 86% of interactions that are pharmacodynamic but whose labels describe PD outcomes caused by PK mechanisms. Telling the teacher to reason about receptors when it should reason about enzyme inhibition actively degrades trace quality. Fix 1 was disabled.
+Three findings are clear from the completed ablations.
 
-**Fix 4 helps.** Removing the severity classifier decreases metabolism accuracy from 25% to 24% and slightly reduces overall performance. The severity context helps the teacher commit to a direction on metabolic interactions, confirming the hypothesis that knowing the severity helps anchor directional reasoning.
+**Fix 1 hurts.** Removing the PK/PD flag improves every metric. Overall direction accuracy increases from 62.5% to 63.3%, metabolism accuracy increases from 25% to 33%, and prodrug accuracy increases from 59.2% to 62.3%. The flag misleads the teacher on the 86% of interactions that are pharmacodynamic but whose labels describe PD outcomes caused by PK mechanisms. Fix 1 was disabled.
 
-**Fix 5 results pending.** The no-pathway note ablation is currently running. Results will be added when available.
+**Fix 4 helps modestly.** Removing the severity classifier slightly decreases metabolism accuracy from 25% to 24%. The severity context helps the teacher commit to a direction on metabolic interactions.
 
+**Fix 5 is the largest single contributor to metabolism accuracy.** Removing the no-pathway note drops metabolism accuracy from 25% to 8%, back to near baseline. The note is doing important work redirecting the teacher away from hallucinated CYP reasoning on pairs with no shared pathway nodes.
+
+The Fix 2 ablation result will be added when available.
 ---
 
 ### What This Means
@@ -253,8 +265,6 @@ Grounded factuality consistently shows Tanimoto scoring higher than pathway retr
 The ablation study adds a methodological contribution beyond the main results: it demonstrates that not all pharmacological intuitions translate into prompt improvements. The PK/PD flag was a reasonable hypothesis that turned out to hurt performance, and detecting that required a controlled experiment. This is the value of the ablation design.
 
 The critical next experiment is student training. All results so far measure Stage 1 quality. Whether Stage 1 improvements flow through judge filtering and LoRA fine-tuning into better student F1 is an open question that requires the full pipeline run.
-
-
 
 ## Future Work
 
@@ -267,10 +277,6 @@ The comparison will be run on Dataset B (194 classes) rather than Dataset A (129
 The evaluation will report two results. First, F1 on the 129 shared classes that exist in both datasets, enabling direct comparison against the baseline. Second, F1 on the 34 extra Dataset B classes with sufficient test pairs (10 or more). The baseline student scores 0% on these classes by construction since they were never in its training data. Any non-zero F1 from the RJ student on these classes is a direct demonstration of what pathway retrieval enables.
 
 Tail class F1 will be reported separately within both evaluations because that is where the largest gains are expected. Pathway retrieval's coverage advantage is most pronounced for rare classes, the teacher has fewer training examples to work from for tail classes making better examples more valuable, and these are exactly the interactions where current models fail most in clinical practice.
-
-### No-Pathway Note Ablation
-
-The ablation result for Fix 5 (no-pathway note) is currently pending. This will be added to the ablation table and its contribution assessed before committing to the full pipeline run.
 
 ### Severity Classifier Improvement
 
