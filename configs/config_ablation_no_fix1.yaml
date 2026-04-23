@@ -1,0 +1,37 @@
+project:
+  name: ablation_no_fix1
+  seed: 42
+  output_dir: /scratch/rjafri/rj_subset_exp1/outputs/ablation_no_fix1
+
+data:
+  xml_path: data/raw/drugbank_full.xml
+  ddinter_dir: data/raw/ddinter
+  processed_dir: data/processed/dataset_A
+  retrieval_file: data/processed/dataset_A/retrieved_examples_train_rj.json
+  use_rj_prompts: true
+  ablation_use_pkpd_flag: false
+  ablation_use_severity_classifier: true
+  ablation_use_no_pathway_note: true
+
+teacher:
+  model_name: meta-llama/Llama-3.3-70B-Instruct
+  tensor_parallel_size: 4
+  dtype: float16
+  max_model_len: 8192
+  max_new_tokens: 1536
+  temperature: 0.6
+  top_p: 0.95
+  batch_size: 32
+  gpu_memory_utilization: 0.92
+  save_every_n_batches: 25
+
+retrieval:
+  fingerprint_bits: 2048
+  fingerprint_radius: 2
+  top_k: 5
+  min_diverse_classes: 2
+
+grounded_eval:
+  precision_weight: 0.7
+  low_score_percentile: 15
+  discard_threshold: 0.3

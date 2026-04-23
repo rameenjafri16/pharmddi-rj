@@ -85,7 +85,7 @@ def sample_pairs_stratified(
             if n_sample > 0:
                 parts.append(class_df.sample(n=n_sample, random_state=rng))
 
-    sampled = pd.concat(parts, ignore_index=True)
+    sampled = pd.concat(parts, ignore_index=False)
 
     # Trim or top-up to exactly n_total
     if len(sampled) > n_total:
@@ -97,9 +97,13 @@ def sample_pairs_stratified(
             n=min(n_total - len(sampled), len(remaining)),
             random_state=rng,
         )
-        sampled = pd.concat([sampled, extra], ignore_index=True)
+        sampled = pd.concat([sampled, extra], ignore_index=False)
 
-    sampled = sampled.sample(frac=1.0, random_state=rng).reset_index(drop=True)
+    # Preserve original train_df index as a column BEFORE resetting
+    # This is critical — the retrieval file keys are original train_df row numbers
+    sampled = sampled.sample(frac=1.0, random_state=rng)
+    sampled["orig_idx"] = sampled.index
+    sampled = sampled.reset_index(drop=True)
     print(f"Sampled {len(sampled):,} pairs")
     tier_counts = sampled["label"].map(tier_map).value_counts()
     for tier in ("head", "mid", "tail"):
@@ -182,8 +186,24 @@ def generate_traces_for_condition(
     from vllm import LLM, SamplingParams
 
     if use_rj_prompts:
-        from src.data_preparation_rj import TEACHER_SYSTEM_PROMPT, build_teacher_prompt
-        logger.info(f"  Using RJ prompts (PK/PD flag + prodrug warnings)")
+        from src.data_preparation_rj import TEACHER_SYSTEM_PROMPT, build_teacher_prompt as _build_rj
+        from src.data_preparation import TEACHER_SYSTEM_PROMPT as _sys_orig
+        # Read ablation flags from config (all default True = all fixes on)
+        _dcfg = cfg.get("data", {})
+        _use_pkpd      = _dcfg.get("ablation_use_pkpd_flag", True)
+        _use_severity  = _dcfg.get("ablation_use_severity_classifier", True)
+        _use_nopathway = _dcfg.get("ablation_use_no_pathway_note", True)
+        _use_prodrug   = _dcfg.get("ablation_use_prodrug_warning", True)
+        def build_teacher_prompt(row, lmap, prof, retr):
+            return _build_rj(row, lmap, prof, retr,
+                             use_pkpd_flag=_use_pkpd,
+                             use_severity_classifier=_use_severity,
+                             use_no_pathway_note=_use_nopathway,
+                             use_prodrug_warning=_use_prodrug)
+        logger.info(
+            f"  Using RJ prompts — "
+            f"pkpd={_use_pkpd} severity={_use_severity} no_pathway={_use_nopathway}"
+        )
     else:
         from src.data_preparation import TEACHER_SYSTEM_PROMPT, build_teacher_prompt
         logger.info(f"  Using original prompts")
@@ -242,8 +262,11 @@ def generate_traces_for_condition(
                 # Retrieve examples — handle two formats:
                 # Tanimoto: str key -> list of example dicts (already formatted)
                 # Pathway:  int key -> list of int row indices into train_df
-                raw = retrievals.get(str(orig_idx),
-                        retrievals.get(int(orig_idx), []))
+                # IMPORTANT: use orig_idx (original train_df row number) not
+                # the reset index, because retrieval keys are original row numbers
+                lookup_idx = int(row.get("orig_idx", orig_idx))
+                raw = retrievals.get(str(lookup_idx),
+                        retrievals.get(lookup_idx, []))
                 retr_examples = []
                 for item in raw[:5]:
                     try:
@@ -270,11 +293,27 @@ def generate_traces_for_condition(
                     {"role": "system", "content": TEACHER_SYSTEM_PROMPT},
                     {"role": "user",   "content": user_msg},
                 ]
-                prompts.append(tokenizer.apply_chat_template(
+                prompt_str = tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True
-                ))
+                )
+                # ── Token length check ────────────────────────────────────
+                # Log warning if prompt approaches context window limit.
+                # vLLM silently truncates from the BEGINNING when over limit,
+                # which drops retrieved examples — the most important part.
+                prompt_tokens = len(tokenizer.encode(prompt_str))
+                max_ctx = cfg["teacher"].get("max_model_len", 8192)
+                max_new = cfg["teacher"].get("max_new_tokens", 1536)
+                available = max_ctx - max_new
+                if prompt_tokens > available * 0.95:
+                    logger.warning(
+                        f"  LONG PROMPT: {row.get('drug1_name','?')} + "
+                        f"{row.get('drug2_name','?')} — "
+                        f"{prompt_tokens} tokens / {available} available "
+                        f"({'TRUNCATED' if prompt_tokens > available else 'near limit'})"
+                    )
+                prompts.append(prompt_str)
                 batch_meta.append({
-                    "orig_idx":   int(orig_idx),
+                    "orig_idx":   lookup_idx,
                     "drug1_id":   row["drug1_id"],
                     "drug2_id":   row["drug2_id"],
                     "drug1_name": str(row.get("drug1_name", "")),
@@ -283,6 +322,7 @@ def generate_traces_for_condition(
                     "label_text": str(row.get("label_text", "")),
                     "severity":   str(row.get("severity", "Unknown")),
                     "tier":       row.get("frequency_tier", "mid"),
+                    "prompt_tokens": prompt_tokens,
                 })
 
             outputs = llm.generate(prompts, params)
@@ -297,6 +337,17 @@ def generate_traces_for_condition(
                 f"  {condition_name}: {done_so_far:,}/{len(remaining):,} "
                 f"({100*done_so_far/len(remaining):.1f}%)"
             )
+
+    # ── Prompt length summary for this condition ─────────────────────────
+    all_tokens = [r.get("prompt_tokens", 0) for r in
+                  [json.loads(l) for l in open(trace_file)]]
+    if all_tokens:
+        import numpy as np
+        logger.info(f"  Prompt token stats for {condition_name}:")
+        logger.info(f"    Mean:   {np.mean(all_tokens):.0f} tokens")
+        logger.info(f"    Max:    {max(all_tokens)} tokens")
+        logger.info(f"    >6500:  {sum(1 for t in all_tokens if t > 6500)} prompts")
+        logger.info(f"    >7000:  {sum(1 for t in all_tokens if t > 7000)} prompts (near limit)")
 
     # Clean up GPU memory before next condition
     del llm

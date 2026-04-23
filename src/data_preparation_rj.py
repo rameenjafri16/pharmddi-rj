@@ -187,7 +187,17 @@ def _format_drug_profile(profile: dict) -> str:
     return "\n".join(l for l in lines if l)
 
 
-def build_teacher_prompt(row, label_map, profiles, retrieved_examples=None):
+def build_teacher_prompt(row, label_map, profiles, retrieved_examples=None,
+                         use_pkpd_flag=False,  # disabled — hurts direction accuracy on mixed interactions
+                         use_severity_classifier=True,
+                         use_no_pathway_note=True,
+                         use_prodrug_warning=True):
+    """
+    use_pkpd_flag:           Fix 1 — PK/PD interaction type hint
+    use_severity_classifier: Fix 4 — rule-based severity when Unknown/teacher
+    use_no_pathway_note:     Fix 5 — warn teacher when no shared pathway nodes
+    Fix 2 (prodrug) and Fix 3 (truncation caps) are always on — lower risk.
+    """
     """Construct the enriched teacher prompt with drug profiles and retrieved examples."""
     parts = []
 
@@ -224,7 +234,7 @@ def build_teacher_prompt(row, label_map, profiles, retrieved_examples=None):
     # (hallucinated). Rule-based classifier provides evidence-based labels.
     severity = str(row.get("severity", "Unknown"))
     severity_source = str(row.get("severity_source", "none"))
-    if severity == "Unknown" or severity_source == "teacher":
+    if use_severity_classifier and (severity == "Unknown" or severity_source == "teacher"):
         try:
             from src.severity_classifier import classify_severity as _clf_sev
             _result = _clf_sev(
@@ -252,34 +262,36 @@ def build_teacher_prompt(row, label_map, profiles, retrieved_examples=None):
     #       drug levels in blood
     #   PD: both drugs act on the same receptor/system — reason about
     #       additive/synergistic/antagonistic effects on physiology
-    interaction_type = classify_pk_pd(row.get("label_text", row.get("template", "")))
-    parts.append(
-        f"Interaction type: {interaction_type} "
-        f"({'pharmacokinetic — reason about ADME mechanisms, enzyme/transporter roles, and drug level changes' if interaction_type == 'PK' else 'pharmacodynamic — reason about receptor/system effects and combined pharmacological actions'})"
-    )
-    parts.append("")
+    if use_pkpd_flag:
+        interaction_type = classify_pk_pd(row.get("label_text", row.get("template", "")))
+        parts.append(
+            f"Interaction type: {interaction_type} "
+            f"({'pharmacokinetic — reason about ADME mechanisms, enzyme/transporter roles, and drug level changes' if interaction_type == 'PK' else 'pharmacodynamic — reason about receptor/system effects and combined pharmacological actions'})"
+        )
+        parts.append("")
 
     # ── Prodrug warning ───────────────────────────────────────────────────────
     # If either drug is a prodrug, warn the teacher that enzyme inhibition
     # has the OPPOSITE effect compared to a normal drug:
     #   Normal drug:  inhibitor blocks breakdown → more drug in blood
     #   Prodrug:      inhibitor blocks activation → LESS active drug
-    prodrug_ids = _load_prodrug_ids()
-    prodrug_warnings = []
-    for drug_id, drug_name in [(row["drug1_id"], row["drug1_name"]),
-                                (row["drug2_id"], row["drug2_name"])]:
-        if drug_id in prodrug_ids:
-            prodrug_warnings.append(
-                f"⚠️  PRODRUG WARNING: {drug_name} is a prodrug — it is "
-                f"pharmacologically inactive until converted to its active form "
-                f"by an enzyme. If an enzyme involved in its activation is "
-                f"inhibited, the result is DECREASED active drug levels (not "
-                f"increased). Reason about activation, not elimination."
-            )
-    if prodrug_warnings:
-        for warning in prodrug_warnings:
-            parts.append(warning)
-        parts.append("")
+    if use_prodrug_warning:
+        prodrug_ids = _load_prodrug_ids()
+        prodrug_warnings = []
+        for drug_id, drug_name in [(row["drug1_id"], row["drug1_name"]),
+                                    (row["drug2_id"], row["drug2_name"])]:
+            if drug_id in prodrug_ids:
+                prodrug_warnings.append(
+                    f"⚠️  PRODRUG WARNING: {drug_name} is a prodrug — it is "
+                    f"pharmacologically inactive until converted to its active form "
+                    f"by an enzyme. If an enzyme involved in its activation is "
+                    f"inhibited, the result is DECREASED active drug levels (not "
+                    f"increased). Reason about activation, not elimination."
+                )
+        if prodrug_warnings:
+            for warning in prodrug_warnings:
+                parts.append(warning)
+            parts.append("")
 
     parts.append(
         "Explain step-by-step the pharmacological mechanisms behind this "
@@ -290,29 +302,29 @@ def build_teacher_prompt(row, label_map, profiles, retrieved_examples=None):
     # ── No shared pathway note ──────────────────────────────────────────────
     # When drugs share no common enzymes/transporters/targets, the teacher
     # has no pathway anchor. Tell it to reason pharmacodynamically instead.
-    try:
-        from src.pathway_retrieval import _extract_pathway_nodes
-        _p1_nodes = _extract_pathway_nodes(p1) if p1 else {}
-        _p2_nodes = _extract_pathway_nodes(p2) if p2 else {}
-        # Check overlap across all three annotation types
-        _shared = (
-            set(_p1_nodes.get("enzymes", {})) & set(_p2_nodes.get("enzymes", {})) |
-            set(_p1_nodes.get("transporters", {})) & set(_p2_nodes.get("transporters", {})) |
-            set(_p1_nodes.get("targets", {})) & set(_p2_nodes.get("targets", {}))
-        )
-        _has_data = any(_p1_nodes.get(k) for k in ("enzymes","transporters","targets")) or                     any(_p2_nodes.get(k) for k in ("enzymes","transporters","targets"))
-        if not _shared and _has_data:
-            parts.append(
-                "⚠️  NOTE: These two drugs share NO common enzymes, transporters, "
-                "or targets in DrugBank. There is no direct pharmacokinetic pathway "
-                "connecting them. Focus your reasoning on pharmacodynamic mechanisms "
-                "— do both drugs act on the same receptor, ion channel, or "
-                "physiological system? Do NOT invoke CYP enzyme reasoning unless "
-                "the drug profiles above explicitly show CYP involvement."
+    if use_no_pathway_note:
+        try:
+            from src.pathway_retrieval import _extract_pathway_nodes
+            _p1_nodes = _extract_pathway_nodes(p1) if p1 else {}
+            _p2_nodes = _extract_pathway_nodes(p2) if p2 else {}
+            _shared = (
+                set(_p1_nodes.get("enzymes", {})) & set(_p2_nodes.get("enzymes", {})) |
+                set(_p1_nodes.get("transporters", {})) & set(_p2_nodes.get("transporters", {})) |
+                set(_p1_nodes.get("targets", {})) & set(_p2_nodes.get("targets", {}))
             )
-            parts.append("")
-    except Exception:
-        pass  # pathway retrieval not available
+            _has_data = any(_p1_nodes.get(k) for k in ("enzymes","transporters","targets")) or                         any(_p2_nodes.get(k) for k in ("enzymes","transporters","targets"))
+            if not _shared and _has_data:
+                parts.append(
+                    "⚠️  NOTE: These two drugs share NO common enzymes, transporters, "
+                    "or targets in DrugBank. There is no direct pharmacokinetic pathway "
+                    "connecting them. Focus your reasoning on pharmacodynamic mechanisms "
+                    "— do both drugs act on the same receptor, ion channel, or "
+                    "physiological system? Do NOT invoke CYP enzyme reasoning unless "
+                    "the drug profiles above explicitly show CYP involvement."
+                )
+                parts.append("")
+        except Exception:
+            pass  # pathway retrieval not available
 
     return "\n".join(parts)
 

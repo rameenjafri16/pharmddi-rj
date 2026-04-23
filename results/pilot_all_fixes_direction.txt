@@ -1,0 +1,55 @@
+======================================================================
+DIRECTION-AWARE EVALUATION REPORT
+======================================================================
+
+TANIMOTO + original prompts (4,000 traces):
+  Overall:
+    Correct:    2,445 (61.1%)
+    Wrong:      101 (2.5%)
+    Ambiguous:  685 (17.1%)
+    Not stated: 697 (17.4%)
+    Unknown:    72 (1.8%)
+
+  Prodrug pairs (382 pairs, 9.6% of total):
+    Correct:    215 (56.3%)
+    Wrong:      13 (3.4%)
+    Ambiguous:  70 (18.3%)
+    Not stated: 81 (21.2%)
+    Mentions prodrug/activation: 322/382 (84.3%)
+
+  By interaction subject:
+    other                     n=3,290  correct=2,203 (67%)  wrong=91 (3%)
+    serum_concentration       n=440  correct=170 (39%)  wrong=6 (1%)
+    metabolism                n=161  correct=9 (6%)  wrong=4 (2%)
+    absorption                n=56  correct=45 (80%)  wrong=0 (0%)
+    excretion                 n=53  correct=18 (34%)  wrong=0 (0%)
+
+PATHWAY + RJ prompts (4,000 traces):
+  Overall:
+    Correct:    2,502 (62.5%)
+    Wrong:      124 (3.1%)
+    Ambiguous:  553 (13.8%)
+    Not stated: 749 (18.7%)
+    Unknown:    72 (1.8%)
+
+  Prodrug pairs (382 pairs, 9.6% of total):
+    Correct:    226 (59.2%)
+    Wrong:      27 (7.1%)
+    Ambiguous:  39 (10.2%)
+    Not stated: 87 (22.8%)
+    Mentions prodrug/activation: 347/382 (90.8%)
+
+  By interaction subject:
+    other                     n=3,290  correct=2,227 (68%)  wrong=95 (3%)
+    serum_concentration       n=440  correct=165 (38%)  wrong=29 (7%)
+    metabolism                n=161  correct=41 (25%)  wrong=0 (0%)
+    absorption                n=56  correct=50 (89%)  wrong=0 (0%)
+    excretion                 n=53  correct=19 (36%)  wrong=0 (0%)
+
+======================================================================
+HEAD-TO-HEAD ON 4,000 MATCHED PAIRS:
+  Both correct:       1,993 (49.8%)
+  Tanimoto only:      452 (11.3%)
+  Pathway only:       509 (12.7%)
+  Neither correct:    1,046 (26.1%)
+======================================================================

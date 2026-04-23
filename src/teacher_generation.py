@@ -213,7 +213,18 @@ def generate_traces(cfg: dict):
     # config.yaml leaves use_rj_prompts unset → uses original data_preparation.py.
     # Mohammadreza's pipeline is completely unaffected.
     if cfg.get("data", {}).get("use_rj_prompts", False):
-        from src.data_preparation_rj import TEACHER_SYSTEM_PROMPT, build_teacher_prompt
+        from src.data_preparation_rj import TEACHER_SYSTEM_PROMPT, build_teacher_prompt as _build_rj
+        _dcfg = cfg.get("data", {})
+        _use_pkpd      = _dcfg.get("ablation_use_pkpd_flag", False)
+        _use_severity  = _dcfg.get("ablation_use_severity_classifier", True)
+        _use_nopathway = _dcfg.get("ablation_use_no_pathway_note", True)
+        _use_prodrug   = _dcfg.get("ablation_use_prodrug_warning", False)
+        def build_teacher_prompt(row, lmap, prof, retr):
+            return _build_rj(row, lmap, prof, retr,
+                             use_pkpd_flag=_use_pkpd,
+                             use_severity_classifier=_use_severity,
+                             use_no_pathway_note=_use_nopathway,
+                             use_prodrug_warning=_use_prodrug)
     else:
         from src.data_preparation import TEACHER_SYSTEM_PROMPT, build_teacher_prompt
 

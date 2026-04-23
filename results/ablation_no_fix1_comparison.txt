@@ -1,0 +1,20 @@
+============================================================
+SUBSET PILOT — TANIMOTO vs PATHWAY RAG
+Teacher: meta-llama/Llama-3.3-70B-Instruct
+N pairs: 4,000
+============================================================
+
+Tanimoto grounded score (mean): 0.7353
+Pathway  grounded score (mean): 0.7219
+Delta (pathway − tanimoto):     -0.0134
+
+By tier:
+  head  Tan=0.7485  Path=0.7300  Δ=-0.0185  (n=1225)
+  mid   Tan=0.7343  Path=0.7156  Δ=-0.0187  (n=1402)
+  tail  Tan=0.7247  Path=0.7211  Δ=-0.0036  (n=1373)
+
+Pathway better on:  22.1% of pairs
+Tanimoto better on: 31.3% of pairs
+
+VERDICT: TANIMOTO BETTER
+============================================================
