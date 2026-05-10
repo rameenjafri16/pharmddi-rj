@@ -201,7 +201,7 @@ To test whether the prompt improvements and pathway retrieval actually produce b
 
 Condition 1 is the Tanimoto baseline: original prompts with no fixes and Tanimoto-retrieved examples. Tanimoto retrievals were recomputed from scratch against our dataset ordering to ensure correct index alignment.
 
-Condition 2 is the RJ configuration: prompt fixes 2, 3, 4, and 5 active (fix 1 disabled based on ablation findings) with pathway-retrieved examples.
+Condition 2 is the RJ configuration: prompt fixes 3, 4, and 5 active (fixes 1 and 2 disabled based on ablation findings) with hybrid-retrieved examples. Hybrid retrieval selects examples using a three-tier ranking: Tier 1 pairs that are both pathway-similar and structurally similar, Tier 2 pairs that are pathway-similar only, and Tier 3 pairs that are structurally similar only. Five examples are filled from Tier 1 first, then Tier 2, then Tier 3.
 
 The 4,000 pairs were drawn from Dataset A using stratified sampling across frequency tiers with tail overrepresentation (1,225 head, 1,402 mid, 1,373 tail) because pathway retrieval's advantage is hypothesised to be largest for rare classes. The same pairs are used for both conditions.
 
@@ -220,7 +220,7 @@ Two quality metrics were computed. Grounded factuality checks whether pharmacolo
 
 The RJ configuration improves overall direction accuracy by 1.4 percentage points, metabolism direction accuracy by 18 percentage points, and prodrug direction accuracy by 7.4 percentage points. Prodrug ambiguous traces drop by 10 percentage points, meaning the teacher is more decisive as well as more correct on prodrug pairs.
 
-The metabolism improvement is the largest single gain and is primarily attributable to Fix 4 (severity classifier), which gives the teacher explicit severity context that helps it commit to a direction on metabolic interactions. The prodrug improvement is primarily attributable to Fix 2 (prodrug warning), consistent with the earlier pilot results showing +6.6pp on prodrug pairs.
+The metabolism improvement is the largest single gain and is primarily attributable to Fix 4 (severity classifier), which gives the teacher explicit severity context that helps it commit to a direction on metabolic interactions. The prodrug improvement is primarily attributable to pathway retrieval providing mechanistically relevant prodrug examples and Fix 5 redirecting the teacher toward pharmacodynamic reasoning on pairs with no shared pathway nodes.
 
 Head-to-head on matched pairs, the RJ configuration wins on more pairs than it loses: pathway only correct on 12.7% of pairs vs Tanimoto only correct on 11.3%.
 
@@ -241,11 +241,9 @@ Fixes 1, 2, 4, and 5 were ablated. Fix 3 was not ablated because the affected dr
 | Tanimoto baseline | 61.1% | 7% | 51.8% | 11.4% |
 | All fixes (RJ) | 62.5% | 25% | 59.2% | 12.7% |
 | No Fix 1 (no PK/PD) | 63.3% | 33% | 62.3% | 13.5% |
-| No Fix 2 (no prodrug) | pending | pending | pending | pending |
+| No Fix 2 (no prodrug) | 64.1% | 21% | 59.2% | 13.8% |
 | No Fix 4 (no severity) | 62.1% | 24% | 59.2% | 12.8% |
 | No Fix 5 (no pathway note) | 60.3% | 8% | 59.2% | 11.8% |
-
-Three findings emerge from the ablation.
 
 Three findings are clear from the completed ablations.
 
@@ -253,9 +251,10 @@ Three findings are clear from the completed ablations.
 
 **Fix 4 helps modestly.** Removing the severity classifier slightly decreases metabolism accuracy from 25% to 24%. The severity context helps the teacher commit to a direction on metabolic interactions.
 
+**Fix 2 also hurts overall.** Removing the prodrug warning gives the highest overall direction accuracy of any condition (64.1%). The warning fires on all prodrug pairs regardless of whether the specific interaction involves the activation pathway, misfiring on pairs where the prodrug mechanism is irrelevant to the interaction being explained. Fix 2 was disabled in the final configuration. The warning remains in the codebase and is a candidate for refinement — firing only when the interaction label specifically mentions metabolism or activation rather than for all prodrug pairs.
+
 **Fix 5 is the largest single contributor to metabolism accuracy.** Removing the no-pathway note drops metabolism accuracy from 25% to 8%, back to near baseline. The note is doing important work redirecting the teacher away from hallucinated CYP reasoning on pairs with no shared pathway nodes.
 
-The Fix 2 ablation result will be added when available.
 ---
 
 ### What This Means
@@ -270,9 +269,9 @@ The critical next experiment is student training. All results so far measure Sta
 
 ### Student Training Comparison
 
-The immediate next step is training the student model on traces generated with the optimal RJ configuration (pathway retrieval, fixes 2, 3, 4, and 5) and comparing its classification F1 against the baseline student trained on the original traces. This requires approximately 48 GPU hours for full pipeline generation across 236K pairs, judge filtering, and LoRA fine-tuning.
+The immediate next step is training the student model on traces generated with the optimal RJ configuration (hybrid retrieval, fixes 3, 4, and 5) and comparing its classification F1 against the baseline student trained on the original traces. This requires approximately 48 GPU hours for full pipeline generation across 236K pairs, judge filtering, and LoRA fine-tuning. The full teacher generation job is currently running (job 13674667).
 
-The comparison will be run on Dataset B (194 classes) rather than Dataset A (129 classes). This choice is motivated by Finding 5 from the retrieval quality experiment: 23 tail classes in Dataset B have zero Tanimoto coverage but near-complete pathway coverage. Tanimoto retrieval makes these classes untrainable. Pathway retrieval makes them viable.
+The comparison will be run on Dataset A (129 classes) to enable direct comparison against MR's baseline on identical interaction classes. Dataset B (194 classes) is a planned follow-up experiment. This choice is motivated by Finding 5 from the retrieval quality experiment: 23 tail classes in Dataset B have zero Tanimoto coverage but near-complete pathway coverage. Tanimoto retrieval makes these classes untrainable. Pathway retrieval makes them viable.
 
 The evaluation will report two results. First, F1 on the 129 shared classes that exist in both datasets, enabling direct comparison against the baseline. Second, F1 on the 34 extra Dataset B classes with sufficient test pairs (10 or more). The baseline student scores 0% on these classes by construction since they were never in its training data. Any non-zero F1 from the RJ student on these classes is a direct demonstration of what pathway retrieval enables.
 
@@ -294,3 +293,32 @@ A further improvement to the retrieval strategy is enriching the five retrieved 
 
 Explicitly annotating each retrieved example with substrate, inhibitor, and direction labels would give the teacher more precise reasoning templates, particularly for prodrug pairs and metabolism interactions where direction errors are most common. This is a natural Level 2 improvement building on the pathway retrieval infrastructure already in place.
 
+### Hybrid Retrieval Pilot
+
+The full teacher generation currently running uses hybrid retrieval. Once complete, a three-condition pilot experiment will compare direction accuracy across:
+
+Condition 1: Tanimoto baseline (original prompts, Tanimoto retrieval)
+Condition 2: Pathway only (RJ prompts, pure pathway retrieval)
+Condition 3: Hybrid (RJ prompts, three-tier hybrid retrieval)
+
+The hypothesis is that Tier 1 candidates (structurally similar AND pathway-similar) provide stronger reasoning templates than either signal alone, particularly for prodrug pairs and metabolism interactions where direction errors are most common.
+
+### Contribution 1B: Hybrid Retrieval
+
+Following the retrieval quality experiment, the question arose of whether Tanimoto and pathway signals could be combined rather than treated as alternatives. The two strategies capture different aspects of relevance: pathway retrieval is strongest when the mechanism is enzyme-mediated and DrugBank annotations are rich; Tanimoto is informative when drugs are structurally similar and annotations are sparse.
+
+The key insight is that when both signals agree, that agreement is the strongest possible evidence of mechanistic relevance. A candidate pair that is both structurally similar and pathway-similar to the query shares both molecular shape and biological function with the interaction being explained.
+
+Hybrid retrieval ranks candidates into three tiers:
+
+Tier 1: pathway score above threshold AND Tanimoto score above threshold. Both signals agree. Strongest evidence.
+
+Tier 2: pathway score above threshold only. Mechanistically relevant but structurally different. Good evidence.
+
+Tier 3: Tanimoto score above threshold only. Structurally similar but no pathway overlap. Weakest evidence, used as fallback.
+
+The five retrieved examples are filled from Tier 1 first, then Tier 2, then Tier 3, with class diversity enforced across all tiers.
+
+Implementation note: computing Tanimoto scores inside the inner loop over 236K candidates would increase per-query time from 0.9s to 1.84s, making the full computation prohibitively slow. This was resolved by vectorising the Tanimoto lookup using precomputed matrix row operations in numpy, reducing per-query time to 0.79s — comparable to pathway-only retrieval. The full 236K-pair hybrid retrieval was computed as a 20-task SLURM array job, with each task handling approximately 11,810 pairs in about 2.5 hours.
+
+Of the 883 drugs without Morgan fingerprints (predominantly biologics that lack SMILES strings), Tier 3 is unavailable and retrieval degrades gracefully to Tiers 1 and 2 only. This affects approximately 19% of drug pairs but is not a limitation for these drugs since biologics interact almost exclusively through pharmacodynamic mechanisms where pathway retrieval is most effective.
