@@ -28,8 +28,9 @@ def load_config(config_path: str = None) -> dict:
         cfg = yaml.safe_load(f)
 
     # On Compute Canada, redirect all large outputs to $SCRATCH
+    # Only override if output_dir is not already an absolute path
     scratch = os.environ.get("SCRATCH", "")
-    if scratch:
+    if scratch and not os.path.isabs(cfg["project"].get("output_dir", "")):
         cfg["project"]["output_dir"] = os.path.join(
             scratch, "ddi_v3_outputs"
         )

@@ -7,7 +7,7 @@ data:
   xml_path: data/raw/drugbank_full.xml
   ddinter_dir: data/raw/ddinter
   processed_dir: /scratch/rjafri/rj_subset_exp1/data/processed/dataset_A
-  retrieval_file: /scratch/rjafri/rj_subset_exp1/data/processed/dataset_A/retrieved_examples_train_pathway.json
+  retrieval_file: /scratch/rjafri/rj_subset_exp1/data/processed/dataset_A/retrieved_examples_train_hybrid.json
   use_rj_prompts: true
   ablation_use_pkpd_flag: false
   ablation_use_severity_classifier: true
